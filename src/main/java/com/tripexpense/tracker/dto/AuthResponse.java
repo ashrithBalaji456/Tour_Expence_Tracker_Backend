@@ -1,5 +1,6 @@
 package com.tripexpense.tracker.dto;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -15,5 +16,7 @@ public class AuthResponse {
     private String groupName;
     private Long groupId;
     private boolean hasGroup;
+    
+    @JsonProperty("isCreator")
     private boolean isCreator;
 }
