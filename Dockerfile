@@ -11,7 +11,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests -B
 
 # Run Stage
-FROM openjdk:17-slim
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
 # Expose port
