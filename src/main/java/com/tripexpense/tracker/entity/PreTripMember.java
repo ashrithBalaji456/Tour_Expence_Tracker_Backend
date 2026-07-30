@@ -19,12 +19,16 @@ public class PreTripMember {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false, unique = true)
+    @Column(nullable = false)
     private String name;
 
     @Column(nullable = false, precision = 10, scale = 2)
     @Builder.Default
     private BigDecimal budgetLimit = new BigDecimal("10000.00");
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "trip_group_id")
+    private TripGroup tripGroup;
 
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

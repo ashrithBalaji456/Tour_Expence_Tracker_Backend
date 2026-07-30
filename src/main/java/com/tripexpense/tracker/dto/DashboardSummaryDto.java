@@ -34,4 +34,9 @@ public class DashboardSummaryDto {
 
     private int totalExpenseCount;
     private Map<Category, BigDecimal> categoryBreakdown;
+
+    // Access Control metadata
+    @com.fasterxml.jackson.annotation.JsonProperty("isReadOnly")
+    private boolean isReadOnly;
+    private String groupName;
 }

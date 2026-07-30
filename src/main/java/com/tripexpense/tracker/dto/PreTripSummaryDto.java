@@ -17,4 +17,9 @@ public class PreTripSummaryDto {
     private BigDecimal sharePerMember;
     private List<PreTripMemberSummaryDto> memberSummaries;
     private List<PreTripTransferDto> transfers;
+    
+    // Access control metadata
+    @com.fasterxml.jackson.annotation.JsonProperty("isReadOnly")
+    private boolean isReadOnly;
+    private String groupName;
 }

@@ -34,6 +34,10 @@ public class PreTripExpense {
 
     private String notes;
 
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "trip_group_id")
+    private TripGroup tripGroup;
+
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
 

@@ -36,7 +36,9 @@ public class CorsConfig {
                 "Origin, Accept", 
                 "X-Requested-With", 
                 "Access-Control-Request-Method", 
-                "Access-Control-Request-Headers"
+                "Access-Control-Request-Headers",
+                "X-Trip-Group-Id",
+                "x-trip-group-id"
         ));
         
         config.setExposedHeaders(Arrays.asList(

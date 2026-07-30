@@ -3,10 +3,16 @@ package com.tripexpense.tracker.service.impl;
 import com.tripexpense.tracker.dto.*;
 import com.tripexpense.tracker.entity.PreTripExpense;
 import com.tripexpense.tracker.entity.PreTripMember;
+import com.tripexpense.tracker.entity.TripGroup;
+import com.tripexpense.tracker.entity.User;
 import com.tripexpense.tracker.repository.PreTripExpenseRepository;
 import com.tripexpense.tracker.repository.PreTripMemberRepository;
+import com.tripexpense.tracker.repository.TripGroupRepository;
+import com.tripexpense.tracker.repository.UserRepository;
 import com.tripexpense.tracker.service.PreTripService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -21,11 +27,59 @@ public class PreTripServiceImpl implements PreTripService {
 
     private final PreTripMemberRepository memberRepository;
     private final PreTripExpenseRepository expenseRepository;
+    private final UserRepository userRepository;
+    private final TripGroupRepository tripGroupRepository;
+
+    private TripGroup getActiveTripGroup() {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        
+        // Try to get group ID from request header
+        String headerGroupId = null;
+        var attributes = (org.springframework.web.context.request.ServletRequestAttributes) 
+                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attributes != null) {
+            headerGroupId = attributes.getRequest().getHeader("X-Trip-Group-Id");
+        }
+        
+        if (headerGroupId != null && !headerGroupId.isBlank()) {
+            try {
+                Long groupId = Long.parseLong(headerGroupId);
+                var groupOpt = tripGroupRepository.findById(groupId);
+                if (groupOpt.isPresent()) {
+                    TripGroup g = groupOpt.get();
+                    boolean isCreator = g.getCreator().getUsername().equalsIgnoreCase(username);
+                    boolean isMember = g.getMemberUsernames().stream().anyMatch(m -> m.equalsIgnoreCase(username));
+                    if (isCreator || isMember) {
+                        return g;
+                    }
+                }
+            } catch (Exception e) {
+                // fallback
+            }
+        }
+
+        String email = userRepository.findByUsername(username)
+                .map(User::getEmail)
+                .orElse("");
+        List<TripGroup> groups = tripGroupRepository.findAssociatedGroups(username, email);
+        if (groups.isEmpty()) {
+            throw new RuntimeException("No active trip group found for user: " + username);
+        }
+        return groups.get(0);
+    }
+
+    private void verifyWriteAccess(TripGroup group) {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        if (!group.getCreator().getUsername().equalsIgnoreCase(username)) {
+            throw new AccessDeniedException("Only the group creator can perform modifications!");
+        }
+    }
 
     @Override
     @Transactional(readOnly = true)
     public List<PreTripMemberResponse> getAllMembers() {
-        return memberRepository.findAll().stream()
+        TripGroup activeGroup = getActiveTripGroup();
+        return memberRepository.findByTripGroup(activeGroup).stream()
                 .map(this::mapToMemberResponse)
                 .collect(Collectors.toList());
     }
@@ -33,7 +87,10 @@ public class PreTripServiceImpl implements PreTripService {
     @Override
     @Transactional
     public PreTripMemberResponse saveMember(PreTripMemberRequest request) {
-        Optional<PreTripMember> existing = memberRepository.findByNameIgnoreCase(request.getName());
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
+        Optional<PreTripMember> existing = memberRepository.findByNameIgnoreCaseAndTripGroup(request.getName(), activeGroup);
         PreTripMember member;
         if (existing.isPresent()) {
             member = existing.get();
@@ -44,6 +101,7 @@ public class PreTripServiceImpl implements PreTripService {
             member = PreTripMember.builder()
                     .name(request.getName().trim())
                     .budgetLimit(request.getBudgetLimit() != null ? request.getBudgetLimit() : new BigDecimal("10000.00"))
+                    .tripGroup(activeGroup)
                     .build();
         }
         PreTripMember saved = memberRepository.save(member);
@@ -53,16 +111,23 @@ public class PreTripServiceImpl implements PreTripService {
     @Override
     @Transactional
     public void deleteMember(Long id) {
-        if (!memberRepository.existsById(id)) {
-            throw new RuntimeException("Member not found with ID: " + id);
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
+        PreTripMember member = memberRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Member not found with ID: " + id));
+
+        if (!member.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied to this record");
         }
-        memberRepository.deleteById(id);
+        memberRepository.delete(member);
     }
 
     @Override
     @Transactional(readOnly = true)
     public List<PreTripExpenseResponse> getAllExpenses() {
-        return expenseRepository.findAll().stream()
+        TripGroup activeGroup = getActiveTripGroup();
+        return expenseRepository.findByTripGroup(activeGroup).stream()
                 .map(this::mapToExpenseResponse)
                 .collect(Collectors.toList());
     }
@@ -70,12 +135,16 @@ public class PreTripServiceImpl implements PreTripService {
     @Override
     @Transactional
     public PreTripExpenseResponse createExpense(PreTripExpenseRequest request) {
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
         PreTripExpense expense = PreTripExpense.builder()
                 .title(request.getTitle())
                 .amount(request.getAmount())
                 .spentBy(request.getSpentBy().trim())
                 .expenseDate(request.getExpenseDate() != null ? request.getExpenseDate() : java.time.LocalDate.now())
                 .notes(request.getNotes())
+                .tripGroup(activeGroup)
                 .build();
         PreTripExpense saved = expenseRepository.save(expense);
         return mapToExpenseResponse(saved);
@@ -84,8 +153,15 @@ public class PreTripServiceImpl implements PreTripService {
     @Override
     @Transactional
     public PreTripExpenseResponse updateExpense(Long id, PreTripExpenseRequest request) {
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
         PreTripExpense expense = expenseRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Pre-trip expense not found with ID: " + id));
+
+        if (!expense.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied to this record");
+        }
 
         if (request.getTitle() != null) expense.setTitle(request.getTitle());
         if (request.getAmount() != null) expense.setAmount(request.getAmount());
@@ -100,17 +176,24 @@ public class PreTripServiceImpl implements PreTripService {
     @Override
     @Transactional
     public void deleteExpense(Long id) {
-        if (!expenseRepository.existsById(id)) {
-            throw new RuntimeException("Pre-trip expense not found with ID: " + id);
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
+        PreTripExpense expense = expenseRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Pre-trip expense not found with ID: " + id));
+
+        if (!expense.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied to this record");
         }
-        expenseRepository.deleteById(id);
+        expenseRepository.delete(expense);
     }
 
     @Override
     @Transactional(readOnly = true)
     public PreTripSummaryDto getSummary() {
-        List<PreTripMember> members = memberRepository.findAll();
-        List<PreTripExpense> expenses = expenseRepository.findAll();
+        TripGroup activeGroup = getActiveTripGroup();
+        List<PreTripMember> members = memberRepository.findByTripGroup(activeGroup);
+        List<PreTripExpense> expenses = expenseRepository.findByTripGroup(activeGroup);
 
         BigDecimal totalSpent = expenses.stream()
                 .map(PreTripExpense::getAmount)
@@ -217,11 +300,16 @@ public class PreTripServiceImpl implements PreTripService {
             }
         }
 
+        String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
+        boolean isReadOnly = !activeGroup.getCreator().getUsername().equalsIgnoreCase(currentUsername);
+
         return PreTripSummaryDto.builder()
                 .totalSpent(totalSpent)
                 .sharePerMember(sharePerMember)
                 .memberSummaries(summaries)
                 .transfers(transfers)
+                .isReadOnly(isReadOnly)
+                .groupName(activeGroup.getName())
                 .build();
     }
 

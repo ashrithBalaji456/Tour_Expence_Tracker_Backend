@@ -7,12 +7,17 @@ import com.tripexpense.tracker.entity.Category;
 import com.tripexpense.tracker.entity.Expense;
 import com.tripexpense.tracker.entity.PreTripExpense;
 import com.tripexpense.tracker.entity.PreTripMember;
+import com.tripexpense.tracker.entity.TripGroup;
+import com.tripexpense.tracker.entity.User;
 import com.tripexpense.tracker.repository.ExpenseRepository;
 import com.tripexpense.tracker.repository.FundContributionRepository;
 import com.tripexpense.tracker.repository.PreTripExpenseRepository;
 import com.tripexpense.tracker.repository.PreTripMemberRepository;
+import com.tripexpense.tracker.repository.TripGroupRepository;
+import com.tripexpense.tracker.repository.UserRepository;
 import com.tripexpense.tracker.service.DashboardService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,38 +33,74 @@ public class DashboardServiceImpl implements DashboardService {
     private final FundContributionRepository fundRepository;
     private final PreTripExpenseRepository preTripExpenseRepository;
     private final PreTripMemberRepository preTripMemberRepository;
+    private final UserRepository userRepository;
+    private final TripGroupRepository tripGroupRepository;
+
+    private TripGroup getActiveTripGroup() {
+        String username = SecurityContextHolder.getContext().getAuthentication().getName();
+        
+        // Try to get group ID from request header
+        String headerGroupId = null;
+        var attributes = (org.springframework.web.context.request.ServletRequestAttributes) 
+                org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+        if (attributes != null) {
+            headerGroupId = attributes.getRequest().getHeader("X-Trip-Group-Id");
+        }
+        
+        if (headerGroupId != null && !headerGroupId.isBlank()) {
+            try {
+                Long groupId = Long.parseLong(headerGroupId);
+                var groupOpt = tripGroupRepository.findById(groupId);
+                if (groupOpt.isPresent()) {
+                    TripGroup g = groupOpt.get();
+                    boolean isCreator = g.getCreator().getUsername().equalsIgnoreCase(username);
+                    boolean isMember = g.getMemberUsernames().stream().anyMatch(m -> m.equalsIgnoreCase(username));
+                    if (isCreator || isMember) {
+                        return g;
+                    }
+                }
+            } catch (Exception e) {
+                // fallback
+            }
+        }
+
+        String email = userRepository.findByUsername(username)
+                .map(User::getEmail)
+                .orElse("");
+        List<TripGroup> groups = tripGroupRepository.findAssociatedGroups(username, email);
+        if (groups.isEmpty()) {
+            return null; // Return null if user has no groups yet
+        }
+        return groups.get(0);
+    }
 
     @Override
     @Transactional
     public DashboardSummaryDto getSummary() {
-        // Retrieve all current expenses and pre-trip bookings
-        List<Expense> activeExpenses = expenseRepository.findAll();
-        List<PreTripExpense> preTripExpenses = preTripExpenseRepository.findAll();
-        List<PreTripMember> members = preTripMemberRepository.findAll();
+        String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
+        TripGroup activeGroup = getActiveTripGroup();
 
-        // 1. Auto-discover members from logged expenses if no members are in database
-        if (members.isEmpty()) {
-            Set<String> discoveredNames = new HashSet<>();
-            for (Expense e : activeExpenses) {
-                if (e.getPaidBy() != null && !e.getPaidBy().isBlank() && !e.getPaidBy().equalsIgnoreCase("Trip Pool")) {
-                    discoveredNames.add(e.getPaidBy().trim());
-                }
-            }
-            for (PreTripExpense pe : preTripExpenses) {
-                if (pe.getSpentBy() != null && !pe.getSpentBy().isBlank()) {
-                    discoveredNames.add(pe.getSpentBy().trim());
-                }
-            }
-            // Auto-save discovered members with a default ₹10,000 budget limit
-            for (String name : discoveredNames) {
-                PreTripMember newMember = PreTripMember.builder()
-                        .name(name)
-                        .budgetLimit(new BigDecimal("10000.00"))
-                        .build();
-                preTripMemberRepository.save(newMember);
-            }
-            members = preTripMemberRepository.findAll();
+        // Return empty dashboard details if no active group
+        if (activeGroup == null) {
+            return DashboardSummaryDto.builder()
+                    .totalBudget(BigDecimal.ZERO)
+                    .totalSpent(BigDecimal.ZERO)
+                    .remainingBalance(BigDecimal.ZERO)
+                    .sharePerMember(BigDecimal.ZERO)
+                    .memberSummaries(new ArrayList<>())
+                    .transfers(new ArrayList<>())
+                    .isReadOnly(false)
+                    .groupName("")
+                    .categoryBreakdown(new EnumMap<>(Category.class))
+                    .build();
         }
+
+        boolean isReadOnly = !activeGroup.getCreator().getUsername().equalsIgnoreCase(currentUsername);
+
+        // Retrieve scoped expenses and pre-trip bookings
+        List<Expense> activeExpenses = expenseRepository.findByTripGroup(activeGroup);
+        List<PreTripExpense> preTripExpenses = preTripExpenseRepository.findByTripGroup(activeGroup);
+        List<PreTripMember> members = preTripMemberRepository.findByTripGroup(activeGroup);
 
         // Calculate Outflows
         BigDecimal totalActiveSpent = activeExpenses.stream()
@@ -198,7 +239,7 @@ public class DashboardServiceImpl implements DashboardService {
             categoryMap.put(cat, BigDecimal.ZERO);
         }
 
-        List<Object[]> rawBreakdown = expenseRepository.getCategoryExpenseBreakdown();
+        List<Object[]> rawBreakdown = expenseRepository.getCategoryExpenseBreakdown(activeGroup);
         for (Object[] row : rawBreakdown) {
             Category cat = (Category) row[0];
             BigDecimal sum = (BigDecimal) row[1];
@@ -207,10 +248,6 @@ public class DashboardServiceImpl implements DashboardService {
             }
         }
 
-        // Fallbacks for backwards compatibility
-        BigDecimal totalPoolCollected = fundRepository.getTotalFundsSum();
-        if (totalPoolCollected == null) totalPoolCollected = BigDecimal.ZERO;
-
         return DashboardSummaryDto.builder()
                 .totalBudget(totalBudget)
                 .totalSpent(totalSpent)
@@ -218,12 +255,13 @@ public class DashboardServiceImpl implements DashboardService {
                 .sharePerMember(sharePerMember)
                 .memberSummaries(summaries)
                 .transfers(transfers)
-                .totalFundsCollected(totalPoolCollected)
                 .totalExpensesSpent(totalActiveSpent)
                 .totalPreTripSpent(totalPreTripSpent)
                 .totalPreTripBudget(totalBudget)
                 .totalExpenseCount(activeExpenses.size())
                 .categoryBreakdown(categoryMap)
+                .isReadOnly(isReadOnly)
+                .groupName(activeGroup.getName())
                 .build();
     }
 
