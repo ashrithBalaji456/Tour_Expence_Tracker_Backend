@@ -15,12 +15,16 @@ public class CorsConfig {
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
         
-        // Allow standard local React & Vite dev server origins
+        // Allow standard local React & Vite dev server origins + deployed cloud origins
         config.setAllowedOriginPatterns(Arrays.asList(
                 "http://localhost:3000",
                 "http://localhost:3001",
                 "http://localhost:5173",
-                "http://localhost:8080"
+                "http://localhost:8080",
+                "https://*.onrender.com",
+                "https://*.netlify.app",
+                "https://*.vercel.app",
+                "https://tour-expence-tracker-frontend.vercel.app"
         ));
         
         config.setAllowedHeaders(Arrays.asList(
