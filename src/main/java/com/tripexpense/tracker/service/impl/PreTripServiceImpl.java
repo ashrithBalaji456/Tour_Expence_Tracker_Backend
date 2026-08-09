@@ -7,6 +7,9 @@ import com.tripexpense.tracker.entity.TripGroup;
 import com.tripexpense.tracker.entity.User;
 import com.tripexpense.tracker.repository.PreTripExpenseRepository;
 import com.tripexpense.tracker.repository.PreTripMemberRepository;
+import com.tripexpense.tracker.entity.Expense;
+import com.tripexpense.tracker.entity.Category;
+import com.tripexpense.tracker.repository.ExpenseRepository;
 import com.tripexpense.tracker.repository.TripGroupRepository;
 import com.tripexpense.tracker.repository.UserRepository;
 import com.tripexpense.tracker.service.PreTripService;
@@ -29,6 +32,7 @@ public class PreTripServiceImpl implements PreTripService {
     private final PreTripExpenseRepository expenseRepository;
     private final UserRepository userRepository;
     private final TripGroupRepository tripGroupRepository;
+    private final ExpenseRepository activeExpenseRepository;
 
     private TripGroup getActiveTripGroup() {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
@@ -195,10 +199,20 @@ public class PreTripServiceImpl implements PreTripService {
         List<PreTripMember> members = memberRepository.findByTripGroup(activeGroup);
         List<PreTripExpense> expenses = expenseRepository.findByTripGroup(activeGroup);
 
-        BigDecimal totalSpent = expenses.stream()
+        List<Expense> activeExpenses = activeExpenseRepository.findByTripGroup(activeGroup);
+
+        BigDecimal totalPreTripSpent = expenses.stream()
                 .map(PreTripExpense::getAmount)
                 .filter(Objects::nonNull)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal totalActiveSpent = activeExpenses.stream()
+                .filter(e -> e.getCategory() != Category.SETTLEMENT)
+                .map(Expense::getAmount)
+                .filter(Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+
+        BigDecimal totalSpent = totalPreTripSpent.add(totalActiveSpent);
 
         if (members.isEmpty()) {
             return PreTripSummaryDto.builder()
@@ -232,6 +246,42 @@ public class PreTripServiceImpl implements PreTripService {
                 } else {
                     String key = e.getSpentBy().toLowerCase();
                     memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                }
+            }
+        }
+
+        // Add active trip spends (excluding settlements)
+        for (Expense e : activeExpenses) {
+            if (e.getPaidBy() != null && e.getCategory() != Category.SETTLEMENT) {
+                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+                if (e.getPaidBy().equalsIgnoreCase("Group")) {
+                    BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
+                    for (PreTripMember m : members) {
+                        String key = m.getName().toLowerCase();
+                        memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                    }
+                } else {
+                    String key = e.getPaidBy().toLowerCase();
+                    memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                }
+            }
+        }
+
+        // Adjust for any recorded settlements from active expenses
+        for (Expense e : activeExpenses) {
+            if (e.getCategory() == Category.SETTLEMENT && e.getPaidBy() != null) {
+                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+                String fromKey = e.getPaidBy().toLowerCase();
+                String toKey = null;
+                if (e.getNotes() != null && e.getNotes().startsWith("Settle:")) {
+                    String[] parts = e.getNotes().split(":");
+                    if (parts.length >= 3) {
+                        toKey = parts[2].toLowerCase();
+                    }
+                }
+                if (toKey != null) {
+                    memberSpendMap.put(fromKey, memberSpendMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
+                    memberSpendMap.put(toKey, memberSpendMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
                 }
             }
         }

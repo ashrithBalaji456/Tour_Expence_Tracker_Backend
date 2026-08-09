@@ -15,6 +15,9 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
+
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -31,6 +34,7 @@ public class AuthController {
     private final PreTripMemberRepository preTripMemberRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider jwtTokenProvider;
+    private final JdbcTemplate jdbcTemplate;
 
     @PostMapping("/register")
     public ResponseEntity<String> register(@RequestBody RegisterRequest request) {
@@ -172,5 +176,31 @@ public class AuthController {
         }).toList();
 
         return ResponseEntity.ok(dtos);
+    }
+
+    @DeleteMapping("/group/{id}")
+    @Transactional
+    public ResponseEntity<?> deleteGroup(@PathVariable Long id) {
+        String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
+        Optional<TripGroup> groupOpt = tripGroupRepository.findById(id);
+        if (groupOpt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        TripGroup group = groupOpt.get();
+        if (!group.getCreator().getUsername().equalsIgnoreCase(currentUsername)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body("Only the group creator (admin) can delete this trip.");
+        }
+
+        // Delete all dependent records via JdbcTemplate for efficiency and reliability
+        jdbcTemplate.update("DELETE FROM expenses WHERE trip_group_id = ?", id);
+        jdbcTemplate.update("DELETE FROM fund_contributions WHERE trip_group_id = ?", id);
+        jdbcTemplate.update("DELETE FROM pre_trip_expenses WHERE trip_group_id = ?", id);
+        jdbcTemplate.update("DELETE FROM pre_trip_members WHERE trip_group_id = ?", id);
+        jdbcTemplate.update("DELETE FROM trip_group_members WHERE group_id = ?", id);
+
+        // Finally delete the trip group
+        tripGroupRepository.delete(group);
+
+        return ResponseEntity.ok().build();
     }
 }
