@@ -7,5 +7,6 @@ public enum Category {
     ACCOMMODATION,
     SHOPPING,
     ENTERTAINMENT,
-    MISC
+    MISC,
+    SETTLEMENT
 }

@@ -104,6 +104,7 @@ public class DashboardServiceImpl implements DashboardService {
 
         // Calculate Outflows
         BigDecimal totalActiveSpent = activeExpenses.stream()
+                .filter(e -> e.getCategory() != Category.SETTLEMENT)
                 .map(Expense::getAmount)
                 .filter(Objects::nonNull)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
@@ -159,6 +160,26 @@ public class DashboardServiceImpl implements DashboardService {
         for (Expense e : activeExpenses) {
             if (e.getPaidBy() != null) {
                 BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+                
+                // Handle Settlements directly as peer-to-peer adjustments
+                if (e.getCategory() == Category.SETTLEMENT) {
+                    String fromKey = e.getPaidBy().toLowerCase();
+                    String toKey = null;
+                    if (e.getNotes() != null && e.getNotes().startsWith("Settle:")) {
+                        String[] parts = e.getNotes().split(":");
+                        if (parts.length >= 3) {
+                            toKey = parts[2].toLowerCase();
+                        }
+                    }
+                    if (toKey != null) {
+                        // Payer (fromKey) out-of-pocket spend goes up by amt (reducing their debt)
+                        memberSpendMap.put(fromKey, memberSpendMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
+                        // Receiver (toKey) out-of-pocket spend goes down by amt (reducing their credit)
+                        memberSpendMap.put(toKey, memberSpendMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
+                    }
+                    continue;
+                }
+
                 if (e.getPaidBy().equalsIgnoreCase("Group")) {
                     BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
                     for (PreTripMember m : members) {
@@ -233,20 +254,26 @@ public class DashboardServiceImpl implements DashboardService {
             }
         }
 
-        // Category breakdown
+        // Category breakdown (exclude settlements)
         Map<Category, BigDecimal> categoryMap = new EnumMap<>(Category.class);
         for (Category cat : Category.values()) {
-            categoryMap.put(cat, BigDecimal.ZERO);
+            if (cat != Category.SETTLEMENT) {
+                categoryMap.put(cat, BigDecimal.ZERO);
+            }
         }
 
         List<Object[]> rawBreakdown = expenseRepository.getCategoryExpenseBreakdown(activeGroup);
         for (Object[] row : rawBreakdown) {
             Category cat = (Category) row[0];
             BigDecimal sum = (BigDecimal) row[1];
-            if (cat != null && sum != null) {
+            if (cat != null && cat != Category.SETTLEMENT && sum != null) {
                 categoryMap.put(cat, sum);
             }
         }
+
+        long activeCount = activeExpenses.stream()
+                .filter(e -> e.getCategory() != Category.SETTLEMENT)
+                .count();
 
         return DashboardSummaryDto.builder()
                 .totalBudget(totalBudget)
@@ -258,7 +285,7 @@ public class DashboardServiceImpl implements DashboardService {
                 .totalExpensesSpent(totalActiveSpent)
                 .totalPreTripSpent(totalPreTripSpent)
                 .totalPreTripBudget(totalBudget)
-                .totalExpenseCount(activeExpenses.size())
+                .totalExpenseCount((int) activeCount)
                 .categoryBreakdown(categoryMap)
                 .isReadOnly(isReadOnly)
                 .groupName(activeGroup.getName())
