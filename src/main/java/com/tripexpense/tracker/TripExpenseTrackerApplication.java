@@ -17,12 +17,19 @@ public class TripExpenseTrackerApplication {
     }
 
     @PostConstruct
-    public void dropUniqueConstraint() {
+    public void dropConstraints() {
         try {
             jdbcTemplate.execute("ALTER TABLE pre_trip_members DROP CONSTRAINT IF EXISTS uk_hhawsncs4us42a2r9h53m5r87");
             System.out.println("Successfully dropped unique constraint uk_hhawsncs4us42a2r9h53m5r87 on pre_trip_members name column!");
         } catch (Exception e) {
-            System.err.println("Could not drop constraint: " + e.getMessage());
+            System.err.println("Could not drop pre_trip_members constraint: " + e.getMessage());
+        }
+
+        try {
+            jdbcTemplate.execute("ALTER TABLE expenses DROP CONSTRAINT IF EXISTS expenses_category_check");
+            System.out.println("Successfully dropped check constraint expenses_category_check on expenses table!");
+        } catch (Exception e) {
+            System.err.println("Could not drop expenses check constraint: " + e.getMessage());
         }
     }
 }
