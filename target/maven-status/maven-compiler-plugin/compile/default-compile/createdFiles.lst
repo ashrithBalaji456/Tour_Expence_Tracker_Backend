@@ -4,6 +4,7 @@ com\tripexpense\tracker\entity\FundContribution.class
 com\tripexpense\tracker\service\impl\FundServiceImpl.class
 com\tripexpense\tracker\dto\PreTripSummaryDto$PreTripSummaryDtoBuilder.class
 com\tripexpense\tracker\service\ExpenseService.class
+com\tripexpense\tracker\controller\HealthController.class
 com\tripexpense\tracker\dto\AuthResponse.class
 com\tripexpense\tracker\entity\PreTripExpense.class
 com\tripexpense\tracker\dto\ExpenseRequest.class
