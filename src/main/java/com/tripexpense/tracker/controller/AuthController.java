@@ -22,6 +22,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @RestController
@@ -82,6 +83,16 @@ public class AuthController {
         return ResponseEntity.ok(builder.build());
     }
 
+    @GetMapping("/member-exists")
+    public ResponseEntity<Map<String, Boolean>> memberExists(@RequestParam String identifier) {
+        String normalizedIdentifier = identifier.trim();
+        boolean exists = !normalizedIdentifier.isEmpty()
+                && userRepository.findFirstByUsernameIgnoreCaseOrEmailIgnoreCase(
+                        normalizedIdentifier, normalizedIdentifier)
+                .isPresent();
+        return ResponseEntity.ok(Map.of("exists", exists));
+    }
+
     @PostMapping("/group")
     public ResponseEntity<?> createGroup(@RequestBody GroupRequest request) {
         String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
@@ -102,18 +113,16 @@ public class AuthController {
                     continue;
                 }
                 
-                // Try to resolve username from either raw username or raw email
-                Optional<User> invitedUserOpt = userRepository.findByUsernameOrEmail(name, name);
+                Optional<User> invitedUserOpt = userRepository.findFirstByUsernameIgnoreCaseOrEmailIgnoreCase(name, name);
                 if (invitedUserOpt.isPresent()) {
                     String resolvedUsername = invitedUserOpt.get().getUsername();
-                    if (!resolvedUsername.equalsIgnoreCase(creator.getUsername()) && !members.contains(resolvedUsername)) {
+                    if (!resolvedUsername.equalsIgnoreCase(creator.getUsername())
+                            && members.stream().noneMatch(member -> member.equalsIgnoreCase(resolvedUsername))) {
                         members.add(resolvedUsername);
                     }
                 } else {
-                    // Storing raw name/email as fallback if user has not registered yet
-                    if (!members.contains(name)) {
-                        members.add(name);
-                    }
+                    return ResponseEntity.badRequest()
+                            .body("No account found for \"" + name + "\". Ask them to create an account first.");
                 }
             }
         }
