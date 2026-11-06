@@ -19,3 +19,4 @@ public class MemberExpenseAllocationDto {
     private Integer totalDays;
     private String notes;
 }
+

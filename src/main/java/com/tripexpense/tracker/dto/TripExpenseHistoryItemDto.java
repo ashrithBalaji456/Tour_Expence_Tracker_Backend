@@ -19,3 +19,4 @@ public class TripExpenseHistoryItemDto {
     private LocalDateTime expenseDateTime;
     private String notes;
 }
+

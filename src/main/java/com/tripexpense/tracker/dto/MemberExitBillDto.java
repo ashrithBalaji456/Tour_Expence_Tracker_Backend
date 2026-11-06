@@ -29,3 +29,4 @@ public class MemberExitBillDto {
     private BigDecimal netDue; // positive = owes group/host, negative = owed refund
     private String suggestedPayee;
 }
+

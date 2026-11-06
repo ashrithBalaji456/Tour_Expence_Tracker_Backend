@@ -14,3 +14,4 @@ public interface MemberExpenseAllocationRepository extends JpaRepository<MemberE
     void deleteByMember(PreTripMember member);
     List<MemberExpenseAllocation> findByExpenseIdAndSourceType(Long expenseId, String sourceType);
 }
+
