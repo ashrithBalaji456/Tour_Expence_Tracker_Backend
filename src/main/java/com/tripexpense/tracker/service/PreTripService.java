@@ -20,4 +20,9 @@ public interface PreTripService {
 
     // Summary Split Calculations
     PreTripSummaryDto getSummary();
+
+    // History and Early Checkout
+    List<TripExpenseHistoryItemDto> getTripHistoryItems();
+    MemberExitBillDto getMemberExitBill(Long memberId);
+    MemberExitBillDto checkoutMember(Long memberId);
 }

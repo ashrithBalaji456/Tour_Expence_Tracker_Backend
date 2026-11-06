@@ -3,18 +3,8 @@ package com.tripexpense.tracker.service.impl;
 import com.tripexpense.tracker.dto.DashboardSummaryDto;
 import com.tripexpense.tracker.dto.PreTripMemberSummaryDto;
 import com.tripexpense.tracker.dto.PreTripTransferDto;
-import com.tripexpense.tracker.entity.Category;
-import com.tripexpense.tracker.entity.Expense;
-import com.tripexpense.tracker.entity.PreTripExpense;
-import com.tripexpense.tracker.entity.PreTripMember;
-import com.tripexpense.tracker.entity.TripGroup;
-import com.tripexpense.tracker.entity.User;
-import com.tripexpense.tracker.repository.ExpenseRepository;
-import com.tripexpense.tracker.repository.FundContributionRepository;
-import com.tripexpense.tracker.repository.PreTripExpenseRepository;
-import com.tripexpense.tracker.repository.PreTripMemberRepository;
-import com.tripexpense.tracker.repository.TripGroupRepository;
-import com.tripexpense.tracker.repository.UserRepository;
+import com.tripexpense.tracker.entity.*;
+import com.tripexpense.tracker.repository.*;
 import com.tripexpense.tracker.service.DashboardService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -23,7 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDateTime;
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -35,6 +27,7 @@ public class DashboardServiceImpl implements DashboardService {
     private final PreTripMemberRepository preTripMemberRepository;
     private final UserRepository userRepository;
     private final TripGroupRepository tripGroupRepository;
+    private final MemberExpenseAllocationRepository allocationRepository;
 
     private TripGroup getActiveTripGroup() {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
@@ -101,6 +94,7 @@ public class DashboardServiceImpl implements DashboardService {
         List<Expense> activeExpenses = expenseRepository.findByTripGroup(activeGroup);
         List<PreTripExpense> preTripExpenses = preTripExpenseRepository.findByTripGroup(activeGroup);
         List<PreTripMember> members = preTripMemberRepository.findByTripGroup(activeGroup);
+        List<MemberExpenseAllocation> allAllocations = allocationRepository.findByMemberIn(members);
 
         // Calculate Outflows
         BigDecimal totalActiveSpent = activeExpenses.stream()
@@ -135,36 +129,71 @@ public class DashboardServiceImpl implements DashboardService {
         Map<String, BigDecimal> memberPaidMap = new HashMap<>();
         Map<String, BigDecimal> memberOwedMap = new HashMap<>();
         Map<String, Integer> memberEligibleCountMap = new HashMap<>();
+        Map<String, Integer> memberAllocatedCountMap = new HashMap<>();
 
         for (PreTripMember m : members) {
             String key = m.getName().toLowerCase();
             memberPaidMap.put(key, BigDecimal.ZERO);
             memberOwedMap.put(key, BigDecimal.ZERO);
             memberEligibleCountMap.put(key, 0);
+            memberAllocatedCountMap.put(key, 0);
         }
+
+        // Group allocations by source
+        Map<Long, List<MemberExpenseAllocation>> preTripAllocMap = allAllocations.stream()
+                .filter(a -> "PRE_TRIP".equalsIgnoreCase(a.getSourceType()))
+                .collect(Collectors.groupingBy(MemberExpenseAllocation::getExpenseId));
+
+        Map<Long, List<MemberExpenseAllocation>> activeAllocMap = allAllocations.stream()
+                .filter(a -> "ACTIVE".equalsIgnoreCase(a.getSourceType()))
+                .collect(Collectors.groupingBy(MemberExpenseAllocation::getExpenseId));
 
         // 1. Process Pre-Trip Expenses
         for (PreTripExpense pe : preTripExpenses) {
-            java.time.LocalDateTime expenseTime = pe.getExpenseDateTime();
+            LocalDateTime expenseTime = pe.getExpenseDateTime();
             BigDecimal amt = pe.getAmount() != null ? pe.getAmount() : BigDecimal.ZERO;
 
-            List<PreTripMember> eligible = members.stream()
-                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
-                    .toList();
-            if (eligible.isEmpty()) eligible = members;
+            List<MemberExpenseAllocation> allocs = preTripAllocMap.getOrDefault(pe.getId(), Collections.emptyList());
+            Set<String> explicitlyAllocatedMemberKeys = new HashSet<>();
+            BigDecimal totalAllocatedAmt = BigDecimal.ZERO;
 
-            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
-            for (PreTripMember m : eligible) {
-                String key = m.getName().toLowerCase();
-                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
-                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            for (MemberExpenseAllocation alloc : allocs) {
+                String allocKey = alloc.getMember().getName().toLowerCase();
+                memberOwedMap.put(allocKey, memberOwedMap.getOrDefault(allocKey, BigDecimal.ZERO).add(alloc.getAllocatedAmount()));
+                memberAllocatedCountMap.put(allocKey, memberAllocatedCountMap.getOrDefault(allocKey, 0) + 1);
+                explicitlyAllocatedMemberKeys.add(allocKey);
+                totalAllocatedAmt = totalAllocatedAmt.add(alloc.getAllocatedAmount());
+            }
+
+            BigDecimal remainder = amt.subtract(totalAllocatedAmt);
+            if (remainder.compareTo(BigDecimal.ZERO) < 0) remainder = BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .filter(m -> m.getEffectiveTo() == null || !expenseTime.isAfter(m.getEffectiveTo()))
+                    .toList();
+
+            if (eligible.isEmpty()) {
+                eligible = members.stream()
+                        .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                        .toList();
+            }
+
+            if (!eligible.isEmpty() && remainder.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal splitShare = remainder.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+                for (PreTripMember m : eligible) {
+                    String key = m.getName().toLowerCase();
+                    memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                    memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+                }
             }
 
             if (pe.getSpentBy() != null) {
                 if (pe.getSpentBy().equalsIgnoreCase("Group")) {
-                    for (PreTripMember m : eligible) {
+                    for (PreTripMember m : members) {
                         String key = m.getName().toLowerCase();
-                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt.divide(BigDecimal.valueOf(members.size()), 2, RoundingMode.HALF_UP)));
                     }
                 } else {
                     String key = pe.getSpentBy().toLowerCase();
@@ -177,26 +206,50 @@ public class DashboardServiceImpl implements DashboardService {
         for (Expense e : activeExpenses) {
             if (e.getCategory() == Category.SETTLEMENT) continue;
 
-            java.time.LocalDateTime expenseTime = e.getExpenseDateTime();
+            LocalDateTime expenseTime = e.getExpenseDateTime();
             BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
 
-            List<PreTripMember> eligible = members.stream()
-                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
-                    .toList();
-            if (eligible.isEmpty()) eligible = members;
+            List<MemberExpenseAllocation> allocs = activeAllocMap.getOrDefault(e.getId(), Collections.emptyList());
+            Set<String> explicitlyAllocatedMemberKeys = new HashSet<>();
+            BigDecimal totalAllocatedAmt = BigDecimal.ZERO;
 
-            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
-            for (PreTripMember m : eligible) {
-                String key = m.getName().toLowerCase();
-                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
-                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            for (MemberExpenseAllocation alloc : allocs) {
+                String allocKey = alloc.getMember().getName().toLowerCase();
+                memberOwedMap.put(allocKey, memberOwedMap.getOrDefault(allocKey, BigDecimal.ZERO).add(alloc.getAllocatedAmount()));
+                memberAllocatedCountMap.put(allocKey, memberAllocatedCountMap.getOrDefault(allocKey, 0) + 1);
+                explicitlyAllocatedMemberKeys.add(allocKey);
+                totalAllocatedAmt = totalAllocatedAmt.add(alloc.getAllocatedAmount());
+            }
+
+            BigDecimal remainder = amt.subtract(totalAllocatedAmt);
+            if (remainder.compareTo(BigDecimal.ZERO) < 0) remainder = BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .filter(m -> m.getEffectiveTo() == null || !expenseTime.isAfter(m.getEffectiveTo()))
+                    .toList();
+
+            if (eligible.isEmpty()) {
+                eligible = members.stream()
+                        .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                        .toList();
+            }
+
+            if (!eligible.isEmpty() && remainder.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal splitShare = remainder.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+                for (PreTripMember m : eligible) {
+                    String key = m.getName().toLowerCase();
+                    memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                    memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+                }
             }
 
             if (e.getPaidBy() != null) {
                 if (e.getPaidBy().equalsIgnoreCase("Group") || e.getPaidBy().equalsIgnoreCase("Group Pool")) {
-                    for (PreTripMember m : eligible) {
+                    for (PreTripMember m : members) {
                         String key = m.getName().toLowerCase();
-                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt.divide(BigDecimal.valueOf(members.size()), 2, RoundingMode.HALF_UP)));
                     }
                 } else {
                     String key = e.getPaidBy().toLowerCase();
@@ -247,8 +300,12 @@ public class DashboardServiceImpl implements DashboardService {
                     .isSpentOverBudget(isSpentOverBudget)
                     .isShareOverBudget(isShareOverBudget)
                     .effectiveFrom(m.getEffectiveFrom())
+                    .effectiveTo(m.getEffectiveTo())
                     .splitMode(m.getSplitMode())
+                    .isDeparted(m.getIsDeparted())
+                    .settledOnDeparture(m.getSettledOnDeparture())
                     .eligibleExpenseCount(memberEligibleCountMap.getOrDefault(key, 0))
+                    .allocatedItemCount(memberAllocatedCountMap.getOrDefault(key, 0))
                     .build());
 
             if (netBalance.compareTo(BigDecimal.ZERO) > 0) {
@@ -298,13 +355,9 @@ public class DashboardServiceImpl implements DashboardService {
                 categoryMap.put(cat, BigDecimal.ZERO);
             }
         }
-
-        List<Object[]> rawBreakdown = expenseRepository.getCategoryExpenseBreakdown(activeGroup);
-        for (Object[] row : rawBreakdown) {
-            Category cat = (Category) row[0];
-            BigDecimal sum = (BigDecimal) row[1];
-            if (cat != null && cat != Category.SETTLEMENT && sum != null) {
-                categoryMap.put(cat, sum);
+        for (Expense exp : activeExpenses) {
+            if (exp.getCategory() != Category.SETTLEMENT && exp.getAmount() != null) {
+                categoryMap.put(exp.getCategory(), categoryMap.getOrDefault(exp.getCategory(), BigDecimal.ZERO).add(exp.getAmount()));
             }
         }
 

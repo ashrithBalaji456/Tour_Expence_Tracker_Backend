@@ -1,18 +1,8 @@
 package com.tripexpense.tracker.service.impl;
 
 import com.tripexpense.tracker.dto.*;
-import com.tripexpense.tracker.entity.SplitMode;
-import com.tripexpense.tracker.entity.PreTripExpense;
-import com.tripexpense.tracker.entity.PreTripMember;
-import com.tripexpense.tracker.entity.TripGroup;
-import com.tripexpense.tracker.entity.User;
-import com.tripexpense.tracker.repository.PreTripExpenseRepository;
-import com.tripexpense.tracker.repository.PreTripMemberRepository;
-import com.tripexpense.tracker.entity.Expense;
-import com.tripexpense.tracker.entity.Category;
-import com.tripexpense.tracker.repository.ExpenseRepository;
-import com.tripexpense.tracker.repository.TripGroupRepository;
-import com.tripexpense.tracker.repository.UserRepository;
+import com.tripexpense.tracker.entity.*;
+import com.tripexpense.tracker.repository.*;
 import com.tripexpense.tracker.service.PreTripService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.AccessDeniedException;
@@ -35,18 +25,18 @@ public class PreTripServiceImpl implements PreTripService {
     private final UserRepository userRepository;
     private final TripGroupRepository tripGroupRepository;
     private final ExpenseRepository activeExpenseRepository;
+    private final MemberExpenseAllocationRepository allocationRepository;
 
     private TripGroup getActiveTripGroup() {
         String username = SecurityContextHolder.getContext().getAuthentication().getName();
-        
-        // Try to get group ID from request header
+
         String headerGroupId = null;
-        var attributes = (org.springframework.web.context.request.ServletRequestAttributes) 
+        var attributes = (org.springframework.web.context.request.ServletRequestAttributes)
                 org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
         if (attributes != null) {
             headerGroupId = attributes.getRequest().getHeader("X-Trip-Group-Id");
         }
-        
+
         if (headerGroupId != null && !headerGroupId.isBlank()) {
             try {
                 Long groupId = Long.parseLong(headerGroupId);
@@ -74,9 +64,9 @@ public class PreTripServiceImpl implements PreTripService {
         return groups.get(0);
     }
 
-    private void verifyWriteAccess(TripGroup group) {
-        String username = SecurityContextHolder.getContext().getAuthentication().getName();
-        if (!group.getCreator().getUsername().equalsIgnoreCase(username)) {
+    private void verifyWriteAccess(TripGroup activeGroup) {
+        String currentUsername = SecurityContextHolder.getContext().getAuthentication().getName();
+        if (!activeGroup.getCreator().getUsername().equalsIgnoreCase(currentUsername)) {
             throw new AccessDeniedException("Only the group creator can perform modifications!");
         }
     }
@@ -85,8 +75,14 @@ public class PreTripServiceImpl implements PreTripService {
     @Transactional(readOnly = true)
     public List<PreTripMemberResponse> getAllMembers() {
         TripGroup activeGroup = getActiveTripGroup();
-        return memberRepository.findByTripGroup(activeGroup).stream()
-                .map(this::mapToMemberResponse)
+        List<PreTripMember> members = memberRepository.findByTripGroup(activeGroup);
+        List<MemberExpenseAllocation> allAllocations = allocationRepository.findByMemberIn(members);
+
+        Map<Long, List<MemberExpenseAllocation>> allocMap = allAllocations.stream()
+                .collect(Collectors.groupingBy(a -> a.getMember().getId()));
+
+        return members.stream()
+                .map(m -> mapToMemberResponse(m, allocMap.getOrDefault(m.getId(), Collections.emptyList())))
                 .collect(Collectors.toList());
     }
 
@@ -115,12 +111,24 @@ public class PreTripServiceImpl implements PreTripService {
                 member.setSplitMode(mode);
                 member.setEffectiveFrom(effective);
             }
+            if (request.getEffectiveTo() != null) {
+                member.setEffectiveTo(request.getEffectiveTo());
+            }
+            if (request.getIsDeparted() != null) {
+                member.setIsDeparted(request.getIsDeparted());
+            }
+            if (request.getSettledOnDeparture() != null) {
+                member.setSettledOnDeparture(request.getSettledOnDeparture());
+            }
         } else {
             member = PreTripMember.builder()
                     .name(request.getName().trim())
                     .budgetLimit(request.getBudgetLimit() != null ? request.getBudgetLimit() : new BigDecimal("10000.00"))
                     .splitMode(mode)
                     .effectiveFrom(effective)
+                    .effectiveTo(request.getEffectiveTo())
+                    .isDeparted(request.getIsDeparted() != null ? request.getIsDeparted() : false)
+                    .settledOnDeparture(request.getSettledOnDeparture() != null ? request.getSettledOnDeparture() : false)
                     .tripGroup(activeGroup)
                     .build();
         }
@@ -135,7 +143,33 @@ public class PreTripServiceImpl implements PreTripService {
         }
 
         PreTripMember saved = memberRepository.save(member);
-        return mapToMemberResponse(saved);
+
+        // Update allocations if provided
+        if (request.getAllocations() != null) {
+            allocationRepository.deleteByMember(saved);
+            List<MemberExpenseAllocation> newAllocations = new ArrayList<>();
+            for (MemberExpenseAllocationDto dto : request.getAllocations()) {
+                if (dto.getAllocatedAmount() != null && dto.getAllocatedAmount().compareTo(BigDecimal.ZERO) > 0) {
+                    newAllocations.add(MemberExpenseAllocation.builder()
+                            .member(saved)
+                            .expenseId(dto.getExpenseId())
+                            .sourceType(dto.getSourceType())
+                            .title(dto.getTitle() != null ? dto.getTitle() : "Shared Expense")
+                            .originalAmount(dto.getOriginalAmount())
+                            .allocatedAmount(dto.getAllocatedAmount())
+                            .daysCount(dto.getDaysCount())
+                            .totalDays(dto.getTotalDays())
+                            .notes(dto.getNotes())
+                            .build());
+                }
+            }
+            if (!newAllocations.isEmpty()) {
+                allocationRepository.saveAll(newAllocations);
+            }
+        }
+
+        List<MemberExpenseAllocation> memberAllocations = allocationRepository.findByMember(saved);
+        return mapToMemberResponse(saved, memberAllocations);
     }
 
     @Override
@@ -169,8 +203,46 @@ public class PreTripServiceImpl implements PreTripService {
             member.setSplitMode(SplitMode.CUSTOM_DATE);
         }
 
+        if (request.getEffectiveTo() != null) {
+            member.setEffectiveTo(request.getEffectiveTo());
+        }
+
+        if (request.getIsDeparted() != null) {
+            member.setIsDeparted(request.getIsDeparted());
+        }
+
+        if (request.getSettledOnDeparture() != null) {
+            member.setSettledOnDeparture(request.getSettledOnDeparture());
+        }
+
         PreTripMember saved = memberRepository.save(member);
-        return mapToMemberResponse(saved);
+
+        // Update allocations if explicitly supplied
+        if (request.getAllocations() != null) {
+            allocationRepository.deleteByMember(saved);
+            List<MemberExpenseAllocation> newAllocations = new ArrayList<>();
+            for (MemberExpenseAllocationDto dto : request.getAllocations()) {
+                if (dto.getAllocatedAmount() != null && dto.getAllocatedAmount().compareTo(BigDecimal.ZERO) > 0) {
+                    newAllocations.add(MemberExpenseAllocation.builder()
+                            .member(saved)
+                            .expenseId(dto.getExpenseId())
+                            .sourceType(dto.getSourceType())
+                            .title(dto.getTitle() != null ? dto.getTitle() : "Shared Expense")
+                            .originalAmount(dto.getOriginalAmount())
+                            .allocatedAmount(dto.getAllocatedAmount())
+                            .daysCount(dto.getDaysCount())
+                            .totalDays(dto.getTotalDays())
+                            .notes(dto.getNotes())
+                            .build());
+                }
+            }
+            if (!newAllocations.isEmpty()) {
+                allocationRepository.saveAll(newAllocations);
+            }
+        }
+
+        List<MemberExpenseAllocation> memberAllocations = allocationRepository.findByMember(saved);
+        return mapToMemberResponse(saved, memberAllocations);
     }
 
     @Override
@@ -185,6 +257,7 @@ public class PreTripServiceImpl implements PreTripService {
         if (!member.getTripGroup().getId().equals(activeGroup.getId())) {
             throw new AccessDeniedException("Access denied to this record");
         }
+        allocationRepository.deleteByMember(member);
         memberRepository.delete(member);
     }
 
@@ -206,11 +279,12 @@ public class PreTripServiceImpl implements PreTripService {
         PreTripExpense expense = PreTripExpense.builder()
                 .title(request.getTitle())
                 .amount(request.getAmount())
-                .spentBy(request.getSpentBy().trim())
-                .expenseDate(request.getExpenseDate() != null ? request.getExpenseDate() : java.time.LocalDate.now())
+                .spentBy(request.getSpentBy())
+                .expenseDate(request.getExpenseDate())
                 .notes(request.getNotes())
                 .tripGroup(activeGroup)
                 .build();
+
         PreTripExpense saved = expenseRepository.save(expense);
         return mapToExpenseResponse(saved);
     }
@@ -222,17 +296,17 @@ public class PreTripServiceImpl implements PreTripService {
         verifyWriteAccess(activeGroup);
 
         PreTripExpense expense = expenseRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Pre-trip expense not found with ID: " + id));
+                .orElseThrow(() -> new RuntimeException("Expense not found with ID: " + id));
 
         if (!expense.getTripGroup().getId().equals(activeGroup.getId())) {
             throw new AccessDeniedException("Access denied to this record");
         }
 
-        if (request.getTitle() != null) expense.setTitle(request.getTitle());
-        if (request.getAmount() != null) expense.setAmount(request.getAmount());
-        if (request.getSpentBy() != null) expense.setSpentBy(request.getSpentBy().trim());
-        if (request.getExpenseDate() != null) expense.setExpenseDate(request.getExpenseDate());
-        if (request.getNotes() != null) expense.setNotes(request.getNotes());
+        expense.setTitle(request.getTitle());
+        expense.setAmount(request.getAmount());
+        expense.setSpentBy(request.getSpentBy());
+        expense.setExpenseDate(request.getExpenseDate());
+        expense.setNotes(request.getNotes());
 
         PreTripExpense saved = expenseRepository.save(expense);
         return mapToExpenseResponse(saved);
@@ -245,7 +319,7 @@ public class PreTripServiceImpl implements PreTripService {
         verifyWriteAccess(activeGroup);
 
         PreTripExpense expense = expenseRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Pre-trip expense not found with ID: " + id));
+                .orElseThrow(() -> new RuntimeException("Expense not found with ID: " + id));
 
         if (!expense.getTripGroup().getId().equals(activeGroup.getId())) {
             throw new AccessDeniedException("Access denied to this record");
@@ -255,72 +329,320 @@ public class PreTripServiceImpl implements PreTripService {
 
     @Override
     @Transactional(readOnly = true)
-    public PreTripSummaryDto getSummary() {
+    public List<TripExpenseHistoryItemDto> getTripHistoryItems() {
         TripGroup activeGroup = getActiveTripGroup();
-        List<PreTripMember> members = memberRepository.findByTripGroup(activeGroup);
-        List<PreTripExpense> expenses = expenseRepository.findByTripGroup(activeGroup);
+        List<PreTripExpense> preTrip = expenseRepository.findByTripGroup(activeGroup);
+        List<Expense> active = activeExpenseRepository.findByTripGroup(activeGroup);
 
+        List<TripExpenseHistoryItemDto> result = new ArrayList<>();
+
+        for (PreTripExpense pe : preTrip) {
+            result.add(TripExpenseHistoryItemDto.builder()
+                    .id(pe.getId())
+                    .sourceType("PRE_TRIP")
+                    .title(pe.getTitle())
+                    .amount(pe.getAmount())
+                    .category("Pre-Trip Booking")
+                    .paidBy(pe.getSpentBy())
+                    .expenseDateTime(pe.getExpenseDateTime())
+                    .notes(pe.getNotes())
+                    .build());
+        }
+
+        for (Expense e : active) {
+            if (e.getCategory() == Category.SETTLEMENT) continue;
+            result.add(TripExpenseHistoryItemDto.builder()
+                    .id(e.getId())
+                    .sourceType("ACTIVE")
+                    .title(e.getTitle())
+                    .amount(e.getAmount())
+                    .category(e.getCategory().name())
+                    .paidBy(e.getPaidBy())
+                    .expenseDateTime(e.getExpenseDateTime())
+                    .notes(e.getNotes())
+                    .build());
+        }
+
+        result.sort((a, b) -> {
+            if (a.getExpenseDateTime() == null) return -1;
+            if (b.getExpenseDateTime() == null) return 1;
+            return a.getExpenseDateTime().compareTo(b.getExpenseDateTime());
+        });
+
+        return result;
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public MemberExitBillDto getMemberExitBill(Long memberId) {
+        TripGroup activeGroup = getActiveTripGroup();
+        PreTripMember member = memberRepository.findById(memberId)
+                .orElseThrow(() -> new RuntimeException("Member not found: " + memberId));
+
+        if (!member.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied");
+        }
+
+        List<PreTripMember> allMembers = memberRepository.findByTripGroup(activeGroup);
+        List<PreTripExpense> preTripExpenses = expenseRepository.findByTripGroup(activeGroup);
         List<Expense> activeExpenses = activeExpenseRepository.findByTripGroup(activeGroup);
+        List<MemberExpenseAllocation> memberAllocations = allocationRepository.findByMember(member);
 
-        BigDecimal totalPreTripSpent = expenses.stream()
-                .map(PreTripExpense::getAmount)
-                .filter(Objects::nonNull)
+        // Allocations list
+        List<MemberExpenseAllocationDto> allocDtos = memberAllocations.stream()
+                .map(this::mapToAllocationDto)
+                .collect(Collectors.toList());
+
+        BigDecimal totalAllocated = memberAllocations.stream()
+                .map(MemberExpenseAllocation::getAllocatedAmount)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
+        // Stay expenses
+        List<ExitBillItemDto> stayItems = new ArrayList<>();
+        BigDecimal totalStayShare = BigDecimal.ZERO;
+        BigDecimal totalPaidByMember = BigDecimal.ZERO;
+
+        String memberKey = member.getName().toLowerCase();
+
+        // 1. Pre-trip check
+        for (PreTripExpense pe : preTripExpenses) {
+            LocalDateTime dt = pe.getExpenseDateTime();
+            boolean isEligible = (member.getEffectiveFrom() == null || !member.getEffectiveFrom().isAfter(dt))
+                    && (member.getEffectiveTo() == null || !dt.isAfter(member.getEffectiveTo()));
+
+            // If explicitly allocated in history allocations, do not double-count in point-in-time
+            boolean alreadyAllocated = memberAllocations.stream()
+                    .anyMatch(a -> "PRE_TRIP".equalsIgnoreCase(a.getSourceType()) && pe.getId().equals(a.getExpenseId()));
+
+            if (isEligible && !alreadyAllocated) {
+                List<PreTripMember> eligible = allMembers.stream()
+                        .filter(m -> (m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(dt))
+                                && (m.getEffectiveTo() == null || !dt.isAfter(m.getEffectiveTo())))
+                        .toList();
+                int count = Math.max(1, eligible.size());
+                BigDecimal share = pe.getAmount().divide(BigDecimal.valueOf(count), 2, RoundingMode.HALF_UP);
+                stayItems.add(ExitBillItemDto.builder()
+                        .id(pe.getId())
+                        .title(pe.getTitle())
+                        .category("Pre-Trip Booking")
+                        .totalAmount(pe.getAmount())
+                        .activeMemberCount(count)
+                        .memberShare(share)
+                        .expenseDateTime(dt)
+                        .paidBy(pe.getSpentBy())
+                        .build());
+                totalStayShare = totalStayShare.add(share);
+            }
+
+            if (pe.getSpentBy() != null && pe.getSpentBy().equalsIgnoreCase(member.getName())) {
+                totalPaidByMember = totalPaidByMember.add(pe.getAmount());
+            }
+        }
+
+        // 2. Active expenses check
+        for (Expense e : activeExpenses) {
+            if (e.getCategory() == Category.SETTLEMENT) continue;
+            LocalDateTime dt = e.getExpenseDateTime();
+            boolean isEligible = (member.getEffectiveFrom() == null || !member.getEffectiveFrom().isAfter(dt))
+                    && (member.getEffectiveTo() == null || !dt.isAfter(member.getEffectiveTo()));
+
+            boolean alreadyAllocated = memberAllocations.stream()
+                    .anyMatch(a -> "ACTIVE".equalsIgnoreCase(a.getSourceType()) && e.getId().equals(a.getExpenseId()));
+
+            if (isEligible && !alreadyAllocated) {
+                List<PreTripMember> eligible = allMembers.stream()
+                        .filter(m -> (m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(dt))
+                                && (m.getEffectiveTo() == null || !dt.isAfter(m.getEffectiveTo())))
+                        .toList();
+                int count = Math.max(1, eligible.size());
+                BigDecimal share = e.getAmount().divide(BigDecimal.valueOf(count), 2, RoundingMode.HALF_UP);
+                stayItems.add(ExitBillItemDto.builder()
+                        .id(e.getId())
+                        .title(e.getTitle())
+                        .category(e.getCategory().name())
+                        .totalAmount(e.getAmount())
+                        .activeMemberCount(count)
+                        .memberShare(share)
+                        .expenseDateTime(dt)
+                        .paidBy(e.getPaidBy())
+                        .build());
+                totalStayShare = totalStayShare.add(share);
+            }
+
+            if (e.getPaidBy() != null && e.getPaidBy().equalsIgnoreCase(member.getName())) {
+                totalPaidByMember = totalPaidByMember.add(e.getAmount());
+            }
+        }
+
+        // 3. Settlement expenses check
+        for (Expense e : activeExpenses) {
+            if (e.getCategory() == Category.SETTLEMENT && e.getPaidBy() != null) {
+                if (e.getPaidBy().equalsIgnoreCase(member.getName())) {
+                    totalPaidByMember = totalPaidByMember.add(e.getAmount());
+                }
+            }
+        }
+
+        BigDecimal totalOwed = totalAllocated.add(totalStayShare);
+        BigDecimal netDue = totalOwed.subtract(totalPaidByMember);
+        String suggestedPayee = activeGroup.getCreator().getUsername();
+
+        return MemberExitBillDto.builder()
+                .memberId(member.getId())
+                .memberName(member.getName())
+                .effectiveFrom(member.getEffectiveFrom())
+                .effectiveTo(member.getEffectiveTo())
+                .isDeparted(member.getIsDeparted())
+                .settledOnDeparture(member.getSettledOnDeparture())
+                .historyAllocations(allocDtos)
+                .stayExpenses(stayItems)
+                .totalAllocatedFromHistory(totalAllocated)
+                .totalStayExpensesShare(totalStayShare)
+                .totalOwed(totalOwed)
+                .totalPaid(totalPaidByMember)
+                .netDue(netDue)
+                .suggestedPayee(suggestedPayee)
+                .build();
+    }
+
+    @Override
+    @Transactional
+    public MemberExitBillDto checkoutMember(Long memberId) {
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
+        PreTripMember member = memberRepository.findById(memberId)
+                .orElseThrow(() -> new RuntimeException("Member not found: " + memberId));
+
+        if (!member.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied");
+        }
+
+        MemberExitBillDto bill = getMemberExitBill(memberId);
+
+        // Record a settlement if netDue > 0
+        if (bill.getNetDue() != null && bill.getNetDue().compareTo(new BigDecimal("0.01")) > 0) {
+            String payee = bill.getSuggestedPayee();
+            Expense settlement = Expense.builder()
+                    .title("Early Checkout Settlement: " + member.getName() + " -> " + payee)
+                    .amount(bill.getNetDue())
+                    .category(Category.SETTLEMENT)
+                    .paymentMode(PaymentMode.UPI)
+                    .paidBy(member.getName())
+                    .expenseDate(java.time.LocalDate.now())
+                    .expenseTime(java.time.LocalTime.now())
+                    .notes("Settle:" + member.getName() + ":" + payee)
+                    .tripGroup(activeGroup)
+                    .build();
+            activeExpenseRepository.save(settlement);
+        }
+
+        member.setIsDeparted(true);
+        member.setSettledOnDeparture(true);
+        if (member.getEffectiveTo() == null) {
+            member.setEffectiveTo(LocalDateTime.now());
+        }
+        memberRepository.save(member);
+
+        return getMemberExitBill(memberId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public PreTripSummaryDto getSummary() {
+        TripGroup activeGroup = getActiveTripGroup();
+        List<PreTripExpense> preTripExpenses = expenseRepository.findByTripGroup(activeGroup);
+        List<Expense> activeExpenses = activeExpenseRepository.findByTripGroup(activeGroup);
+        List<PreTripMember> members = memberRepository.findByTripGroup(activeGroup);
+        List<MemberExpenseAllocation> allAllocations = allocationRepository.findByMemberIn(members);
+
+        // Total spent across pre-trip and active expenses
         BigDecimal totalActiveSpent = activeExpenses.stream()
                 .filter(e -> e.getCategory() != Category.SETTLEMENT)
                 .map(Expense::getAmount)
                 .filter(Objects::nonNull)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        BigDecimal totalSpent = totalPreTripSpent.add(totalActiveSpent);
+        BigDecimal totalPreTripSpent = preTripExpenses.stream()
+                .map(PreTripExpense::getAmount)
+                .filter(Objects::nonNull)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
 
-        if (members.isEmpty()) {
-            return PreTripSummaryDto.builder()
-                    .totalSpent(totalSpent)
-                    .sharePerMember(BigDecimal.ZERO)
-                    .memberSummaries(new ArrayList<>())
-                    .transfers(new ArrayList<>())
-                    .build();
-        }
+        BigDecimal totalSpent = totalActiveSpent.add(totalPreTripSpent);
 
-        int memberCount = members.size();
-        BigDecimal sharePerMember = totalSpent.divide(BigDecimal.valueOf(memberCount), 2, RoundingMode.HALF_UP);
+        // Calculate sharePerMember as nominal average
+        BigDecimal sharePerMember = members.isEmpty() ? BigDecimal.ZERO :
+                totalSpent.divide(BigDecimal.valueOf(members.size()), 2, RoundingMode.HALF_UP);
 
-        // Dynamic temporal calculation maps
         Map<String, BigDecimal> memberPaidMap = new HashMap<>();
         Map<String, BigDecimal> memberOwedMap = new HashMap<>();
         Map<String, Integer> memberEligibleCountMap = new HashMap<>();
+        Map<String, Integer> memberAllocatedCountMap = new HashMap<>();
 
         for (PreTripMember m : members) {
             String key = m.getName().toLowerCase();
             memberPaidMap.put(key, BigDecimal.ZERO);
             memberOwedMap.put(key, BigDecimal.ZERO);
             memberEligibleCountMap.put(key, 0);
+            memberAllocatedCountMap.put(key, 0);
         }
 
-        // 1. Process Pre-Trip Expenses
-        for (PreTripExpense pe : expenses) {
+        // 1. Group allocations by expense
+        Map<Long, List<MemberExpenseAllocation>> preTripAllocMap = allAllocations.stream()
+                .filter(a -> "PRE_TRIP".equalsIgnoreCase(a.getSourceType()))
+                .collect(Collectors.groupingBy(MemberExpenseAllocation::getExpenseId));
+
+        Map<Long, List<MemberExpenseAllocation>> activeAllocMap = allAllocations.stream()
+                .filter(a -> "ACTIVE".equalsIgnoreCase(a.getSourceType()))
+                .collect(Collectors.groupingBy(MemberExpenseAllocation::getExpenseId));
+
+        // 2. Process Pre-Trip Expenses
+        for (PreTripExpense pe : preTripExpenses) {
             LocalDateTime expenseTime = pe.getExpenseDateTime();
             BigDecimal amt = pe.getAmount() != null ? pe.getAmount() : BigDecimal.ZERO;
 
-            List<PreTripMember> eligible = members.stream()
-                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
-                    .toList();
-            if (eligible.isEmpty()) eligible = members;
+            List<MemberExpenseAllocation> allocs = preTripAllocMap.getOrDefault(pe.getId(), Collections.emptyList());
+            Set<String> explicitlyAllocatedMemberKeys = new HashSet<>();
+            BigDecimal totalAllocatedAmt = BigDecimal.ZERO;
 
-            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
-            for (PreTripMember m : eligible) {
-                String key = m.getName().toLowerCase();
-                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
-                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            for (MemberExpenseAllocation alloc : allocs) {
+                String allocKey = alloc.getMember().getName().toLowerCase();
+                memberOwedMap.put(allocKey, memberOwedMap.getOrDefault(allocKey, BigDecimal.ZERO).add(alloc.getAllocatedAmount()));
+                memberAllocatedCountMap.put(allocKey, memberAllocatedCountMap.getOrDefault(allocKey, 0) + 1);
+                explicitlyAllocatedMemberKeys.add(allocKey);
+                totalAllocatedAmt = totalAllocatedAmt.add(alloc.getAllocatedAmount());
+            }
+
+            // Remainder split across other eligible members
+            BigDecimal remainder = amt.subtract(totalAllocatedAmt);
+            if (remainder.compareTo(BigDecimal.ZERO) < 0) remainder = BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .filter(m -> m.getEffectiveTo() == null || !expenseTime.isAfter(m.getEffectiveTo()))
+                    .toList();
+
+            if (eligible.isEmpty()) {
+                eligible = members.stream()
+                        .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                        .toList();
+            }
+
+            if (!eligible.isEmpty() && remainder.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal splitShare = remainder.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+                for (PreTripMember m : eligible) {
+                    String key = m.getName().toLowerCase();
+                    memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                    memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+                }
             }
 
             if (pe.getSpentBy() != null) {
                 if (pe.getSpentBy().equalsIgnoreCase("Group")) {
-                    for (PreTripMember m : eligible) {
+                    for (PreTripMember m : members) {
                         String key = m.getName().toLowerCase();
-                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt.divide(BigDecimal.valueOf(members.size()), 2, RoundingMode.HALF_UP)));
                     }
                 } else {
                     String key = pe.getSpentBy().toLowerCase();
@@ -329,30 +651,54 @@ public class PreTripServiceImpl implements PreTripService {
             }
         }
 
-        // 2. Process Active Trip Expenses (excluding settlements)
+        // 3. Process Active Trip Expenses (excluding settlements)
         for (Expense e : activeExpenses) {
             if (e.getCategory() == Category.SETTLEMENT) continue;
 
             LocalDateTime expenseTime = e.getExpenseDateTime();
             BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
 
-            List<PreTripMember> eligible = members.stream()
-                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
-                    .toList();
-            if (eligible.isEmpty()) eligible = members;
+            List<MemberExpenseAllocation> allocs = activeAllocMap.getOrDefault(e.getId(), Collections.emptyList());
+            Set<String> explicitlyAllocatedMemberKeys = new HashSet<>();
+            BigDecimal totalAllocatedAmt = BigDecimal.ZERO;
 
-            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
-            for (PreTripMember m : eligible) {
-                String key = m.getName().toLowerCase();
-                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
-                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            for (MemberExpenseAllocation alloc : allocs) {
+                String allocKey = alloc.getMember().getName().toLowerCase();
+                memberOwedMap.put(allocKey, memberOwedMap.getOrDefault(allocKey, BigDecimal.ZERO).add(alloc.getAllocatedAmount()));
+                memberAllocatedCountMap.put(allocKey, memberAllocatedCountMap.getOrDefault(allocKey, 0) + 1);
+                explicitlyAllocatedMemberKeys.add(allocKey);
+                totalAllocatedAmt = totalAllocatedAmt.add(alloc.getAllocatedAmount());
+            }
+
+            BigDecimal remainder = amt.subtract(totalAllocatedAmt);
+            if (remainder.compareTo(BigDecimal.ZERO) < 0) remainder = BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .filter(m -> m.getEffectiveTo() == null || !expenseTime.isAfter(m.getEffectiveTo()))
+                    .toList();
+
+            if (eligible.isEmpty()) {
+                eligible = members.stream()
+                        .filter(m -> !explicitlyAllocatedMemberKeys.contains(m.getName().toLowerCase()))
+                        .toList();
+            }
+
+            if (!eligible.isEmpty() && remainder.compareTo(BigDecimal.ZERO) > 0) {
+                BigDecimal splitShare = remainder.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+                for (PreTripMember m : eligible) {
+                    String key = m.getName().toLowerCase();
+                    memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                    memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+                }
             }
 
             if (e.getPaidBy() != null) {
                 if (e.getPaidBy().equalsIgnoreCase("Group") || e.getPaidBy().equalsIgnoreCase("Group Pool")) {
-                    for (PreTripMember m : eligible) {
+                    for (PreTripMember m : members) {
                         String key = m.getName().toLowerCase();
-                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt.divide(BigDecimal.valueOf(members.size()), 2, RoundingMode.HALF_UP)));
                     }
                 } else {
                     String key = e.getPaidBy().toLowerCase();
@@ -361,7 +707,7 @@ public class PreTripServiceImpl implements PreTripService {
             }
         }
 
-        // 3. Adjust for any recorded settlements from active expenses
+        // 4. Adjust for settlements
         for (Expense e : activeExpenses) {
             if (e.getCategory() == Category.SETTLEMENT && e.getPaidBy() != null) {
                 BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
@@ -403,8 +749,12 @@ public class PreTripServiceImpl implements PreTripService {
                     .isSpentOverBudget(isSpentOverBudget)
                     .isShareOverBudget(isShareOverBudget)
                     .effectiveFrom(m.getEffectiveFrom())
+                    .effectiveTo(m.getEffectiveTo())
                     .splitMode(m.getSplitMode())
+                    .isDeparted(m.getIsDeparted())
+                    .settledOnDeparture(m.getSettledOnDeparture())
                     .eligibleExpenseCount(memberEligibleCountMap.getOrDefault(key, 0))
+                    .allocatedItemCount(memberAllocatedCountMap.getOrDefault(key, 0))
                     .build());
 
             if (netBalance.compareTo(BigDecimal.ZERO) > 0) {
@@ -414,12 +764,8 @@ public class PreTripServiceImpl implements PreTripService {
             }
         }
 
-        // Settlement matching algorithm
         List<PreTripTransferDto> transfers = new ArrayList<>();
-        
-        // Sort creditors desc (largest surplus first)
         creditors.sort((c1, c2) -> c2.balance.compareTo(c1.balance));
-        // Sort debtors desc (largest debt first)
         debtors.sort((d1, d2) -> d2.balance.compareTo(d1.balance));
 
         int cIdx = 0;
@@ -463,14 +809,36 @@ public class PreTripServiceImpl implements PreTripService {
                 .build();
     }
 
-    private PreTripMemberResponse mapToMemberResponse(PreTripMember member) {
+    private PreTripMemberResponse mapToMemberResponse(PreTripMember member, List<MemberExpenseAllocation> allocations) {
+        List<MemberExpenseAllocationDto> allocDtos = allocations.stream()
+                .map(this::mapToAllocationDto)
+                .collect(Collectors.toList());
+
         return PreTripMemberResponse.builder()
                 .id(member.getId())
                 .name(member.getName())
                 .budgetLimit(member.getBudgetLimit())
                 .effectiveFrom(member.getEffectiveFrom())
+                .effectiveTo(member.getEffectiveTo())
                 .splitMode(member.getSplitMode())
+                .isDeparted(member.getIsDeparted())
+                .settledOnDeparture(member.getSettledOnDeparture())
                 .createdAt(member.getCreatedAt())
+                .allocations(allocDtos)
+                .build();
+    }
+
+    private MemberExpenseAllocationDto mapToAllocationDto(MemberExpenseAllocation alloc) {
+        return MemberExpenseAllocationDto.builder()
+                .id(alloc.getId())
+                .expenseId(alloc.getExpenseId())
+                .sourceType(alloc.getSourceType())
+                .title(alloc.getTitle())
+                .originalAmount(alloc.getOriginalAmount())
+                .allocatedAmount(alloc.getAllocatedAmount())
+                .daysCount(alloc.getDaysCount())
+                .totalDays(alloc.getTotalDays())
+                .notes(alloc.getNotes())
                 .build();
     }
 

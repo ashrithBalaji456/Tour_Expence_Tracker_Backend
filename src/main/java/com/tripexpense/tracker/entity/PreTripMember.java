@@ -29,6 +29,17 @@ public class PreTripMember {
     @Column(name = "effective_from")
     private LocalDateTime effectiveFrom;
 
+    @Column(name = "effective_to")
+    private LocalDateTime effectiveTo;
+
+    @Column(name = "is_departed")
+    @Builder.Default
+    private Boolean isDeparted = false;
+
+    @Column(name = "settled_on_departure")
+    @Builder.Default
+    private Boolean settledOnDeparture = false;
+
     @Enumerated(EnumType.STRING)
     @Column(name = "split_mode")
     @Builder.Default
@@ -44,5 +55,7 @@ public class PreTripMember {
     @PrePersist
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
+        if (this.isDeparted == null) this.isDeparted = false;
+        if (this.settledOnDeparture == null) this.settledOnDeparture = false;
     }
 }

@@ -71,4 +71,21 @@ public class PreTripController {
     public ResponseEntity<PreTripSummaryDto> getSummary() {
         return ResponseEntity.ok(preTripService.getSummary());
     }
+
+    // Full Trip History items for mid-trip selection
+    @GetMapping("/history-items")
+    public ResponseEntity<List<TripExpenseHistoryItemDto>> getTripHistoryItems() {
+        return ResponseEntity.ok(preTripService.getTripHistoryItems());
+    }
+
+    // Early Departure Exit Bill & Settlement
+    @GetMapping("/members/{id}/exit-bill")
+    public ResponseEntity<MemberExitBillDto> getMemberExitBill(@PathVariable Long id) {
+        return ResponseEntity.ok(preTripService.getMemberExitBill(id));
+    }
+
+    @PostMapping("/members/{id}/checkout")
+    public ResponseEntity<MemberExitBillDto> checkoutMember(@PathVariable Long id) {
+        return ResponseEntity.ok(preTripService.checkoutMember(id));
+    }
 }

@@ -23,6 +23,10 @@ public class PreTripMemberSummaryDto {
     private boolean isSpentOverBudget;
     private boolean isShareOverBudget;
     private LocalDateTime effectiveFrom;
+    private LocalDateTime effectiveTo;
     private SplitMode splitMode;
+    private Boolean isDeparted;
+    private Boolean settledOnDeparture;
     private int eligibleExpenseCount;
+    private int allocatedItemCount;
 }

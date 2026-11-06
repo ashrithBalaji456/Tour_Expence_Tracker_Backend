@@ -8,6 +8,7 @@ import lombok.NoArgsConstructor;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @NoArgsConstructor
@@ -18,6 +19,10 @@ public class PreTripMemberResponse {
     private String name;
     private BigDecimal budgetLimit;
     private LocalDateTime effectiveFrom;
+    private LocalDateTime effectiveTo;
     private SplitMode splitMode;
+    private Boolean isDeparted;
+    private Boolean settledOnDeparture;
     private LocalDateTime createdAt;
+    private List<MemberExpenseAllocationDto> allocations;
 }
