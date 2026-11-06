@@ -73,13 +73,23 @@
 If you have never coded before or are new to Java and web backends, read this section carefully. Every concept used in this repository builds on these fundamentals:
 
 ### What is a Backend?
-When you interact with a web application (like clicking "Add Expense" on the React frontend), your browser cannot directly write to a database on the server because that would be insecure. Instead, the browser sends an HTTP request across the internet to the **Backend**.  
+When you interact with a web application (like clicking "Add Expense" on the React frontend or tapping on your Android mobile device), your client cannot directly write to a database on the server because that would be insecure. Instead, the client sends an HTTP request across the internet to the **Backend**.  
 The backend:
-1. Validates who you are (Authentication).
-2. Verifies if you have permission to perform the action (Authorization).
-3. Executes mathematical calculations (like expense splits and balance transfers).
-4. Reads from and writes to the permanent database (PostgreSQL).
-5. Returns a structured JSON response back to your browser.
+1. Validates who you are (Authentication via JWT & BCrypt).
+2. Verifies if you have permission to perform the action (Authorization & Group scoping).
+3. Executes mathematical calculations (like temporal expense splits and bilateral balance transfers).
+4. Reads from and writes to the permanent database (PostgreSQL on Render).
+5. Returns a structured JSON response back to your client.
+
+### Differences in Roles & Operations: Backend vs Frontend
+
+| Dimension | Backend (Spring Boot 3 + PostgreSQL) | Frontend (React 18 + Vite + Capacitor) |
+|:---|:---|:---|
+| **Metaphor** | The **Brain & Vault** | The **Face & Hands** |
+| **Execution Environment** | Remote Linux cloud server (Render) | User's browser (Vercel) & Android phone (Capacitor) |
+| **Trust Level** | **Authoritative & Trusted:** Must verify all inputs, permissions, and database constraints. | **Untrusted:** Client-side JavaScript can be inspected or bypassed by a malicious actor. |
+| **Primary Operations** | • Data persistence in PostgreSQL (ACID safety)<br>• Password encryption via BCrypt<br>• Stateless JWT token issuance & signature validation<br>• Temporal expense splitting & debt minimization algorithms<br>• Group multi-tenancy & access control | • User interface & responsive layouts (Mobile/Tablet/Desktop)<br>• Glassmorphism dark aesthetic (`#0B0F19`)<br>• Input forms & immediate client validation<br>• Interactive data visualization via Recharts<br>• Native device bridge via Capacitor (CapacitorHttp, Haptics, Back Button) |
+| **Communication Bridge** | Exposes REST API endpoints accepting JSON requests with headers:<br>`Authorization: Bearer <JWT>` and `X-Trip-Group-Id: <id>` | Sends HTTP requests via Axios / CapacitorHttp to the backend and renders returned data |
 
 ### What is Java & JVM?
 - **Java** is a strongly typed, object-oriented programming language. "Strongly typed" means every variable must declare what type of data it holds (e.g., `String` for text, `Long` for whole numbers, `BigDecimal` for currency).
@@ -212,31 +222,44 @@ Expenses exist in two distinct phases:
    - Categorized under `Category` enum (`FOOD`, `TRANSPORT`, `ACCOMMODATION`, etc.).
    - Stored with `PaymentMode` (`CASH`, `UPI`, `CARD`, etc.) and `paidBy` (who paid out of pocket).
 
-### Step 4: Real-time Settlement Algorithm
-How does the app know who owes whom, while keeping the number of payments as low as possible?  
-Both `PreTripServiceImpl` and `DashboardServiceImpl` implement a **Greedy Bilateral Debt Minimization Algorithm**:
+### Step 4: Real-time Temporal Settlement Algorithm (Dynamic Mid-Trip Onboarding)
+How does the app know who owes whom, while keeping the number of payments as low as possible and fairly accommodating members who joined mid-trip?  
+Both `PreTripServiceImpl` and `DashboardServiceImpl` implement a **Dynamic Temporal Splitting Engine** combined with a **Greedy Bilateral Debt Minimization Algorithm**:
 
-1. **Calculate Total Trip Outflow**:
-   $$\text{Total Spent} = \sum \text{PreTripExpenses} + \sum \text{ActiveExpenses (Excluding SETTLEMENT)}$$
-2. **Calculate Equal Share Per Member**:
-   $$\text{Share Per Member} = \frac{\text{Total Spent}}{\text{Number of Members}}$$
+1. **Member Temporal Boundaries (`effectiveFrom` & `splitMode`)**:
+   - Each member in `pre_trip_members` has an `effectiveFrom` timestamp.
+   - `FROM_START`: Member participated from Day 1 (`effectiveFrom = null`).
+   - `FROM_NOW`: Member joined mid-trip at the current instant (`effectiveFrom = LocalDateTime.now()`).
+   - `CUSTOM_DATE`: Member joined at a specific flight/train landing timestamp (e.g. `2026-11-04 14:30`).
+
+2. **Per-Expense Dynamic Eligibility Calculation**:
+   Instead of dividing the total trip outflow by a static member count at the end, the engine iterates chronologically through each expense $e$:
+   - Resolves the exact expense timestamp $T(e)$ from `expenseDate` and `expenseTime`.
+   - Filters the set of **Eligible Members** for this specific purchase:
+     $$\text{Eligible}(e) = \{ m \in \text{Members} \mid m.\text{effectiveFrom} \le T(e) \}$$
+   - Splitting Amount:
+     $$\text{Split Share}(e) = \frac{\text{Amount}(e)}{|\text{Eligible}(e)|}$$
+   - Each eligible member's personal owed tally increases by $\text{Split Share}(e)$. Members who joined *after* $T(e)$ owe **₹0.00** for this expense!
+
 3. **Compute Out-of-Pocket Expenditure Per Member**:
-   - If an expense was paid by `"Group"` pool, it is split equally among all members.
-   - If paid by an individual (e.g., `"Alice"`), Alice's personal spending tally increases by that amount.
+   - If an expense was paid by `"Group Pool"`, each eligible member is credited for paying $\text{Split Share}(e)$.
+   - If paid by an individual (e.g., `"Alice"`), Alice's personal spending tally increases by that full amount.
    - When a peer-to-peer settlement payment occurs (`category = SETTLEMENT`, e.g., `"Bob paid Alice ₹500"`):
      - Bob's out-of-pocket tally increases by ₹500 (reducing his debt).
      - Alice's tally decreases by ₹500 (marking her credit as received).
+
 4. **Determine Net Balances**:
-   $$\text{Net Balance} = \text{Total Spent by Member} - \text{Share Per Member}$$
+   $$\text{Net Balance}(m) = \text{Total Paid by } m - \text{Fair Share Owed by } m$$
    - **Positive balance ($> 0$)**: The member paid more than their fair share. They are a **Creditor** (money is owed to them).
    - **Negative balance ($< 0$)**: The member paid less than their fair share. They are a **Debtor** (they owe money).
+
 5. **Greedy Matching**:
    - All Creditors are sorted in descending order of surplus balance.
    - All Debtors are sorted in descending order of debt magnitude.
    - Two pointers step through both lists: the biggest debtor pays as much as possible to the biggest creditor:
      $$\text{Transfer Amount} = \min(\text{Creditor Surplus}, \text{Debtor Debt})$$
    - Once a debtor reaches 0 balance, we move to the next debtor. Once a creditor reaches 0 surplus, we move to the next creditor.
-   - Result: Minimal transactions needed to balance the group completely to zero!
+   - Result: Minimal transactions needed to balance the entire group completely to zero!
 
 ### Step 5: Cloud Health Check
 Cloud platforms (like Render, Railway, AWS ECS) ping web applications periodically to determine if the container is healthy or should be rebooted.  
