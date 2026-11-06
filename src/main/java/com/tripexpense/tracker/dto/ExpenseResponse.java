@@ -10,6 +10,7 @@ import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 
 @Data
 @NoArgsConstructor
@@ -24,6 +25,7 @@ public class ExpenseResponse {
     private PaymentMode paymentMode;
     private String paidBy;
     private LocalDate expenseDate;
+    private LocalTime expenseTime;
     private String notes;
     private LocalDateTime createdAt;
 }

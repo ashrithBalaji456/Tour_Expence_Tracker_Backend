@@ -9,6 +9,7 @@ import lombok.Data;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalTime;
 
 @Data
 public class ExpenseRequest {
@@ -29,6 +30,8 @@ public class ExpenseRequest {
     private String paidBy;
 
     private LocalDate expenseDate;
+
+    private LocalTime expenseTime;
 
     private String notes;
 }

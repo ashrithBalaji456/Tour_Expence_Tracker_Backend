@@ -9,6 +9,7 @@ import lombok.NoArgsConstructor;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 
 @Entity
 @Table(name = "expenses")
@@ -42,6 +43,9 @@ public class Expense {
     @Column(name = "expense_date", nullable = false)
     private LocalDate expenseDate;
 
+    @Column(name = "expense_time")
+    private LocalTime expenseTime;
+
     private String notes;
 
     @ManyToOne(fetch = FetchType.LAZY)
@@ -59,5 +63,16 @@ public class Expense {
         if (this.expenseDate == null) {
             this.expenseDate = LocalDate.now();
         }
+        if (this.expenseTime == null) {
+            this.expenseTime = LocalTime.now();
+        }
+    }
+
+    public LocalDateTime getExpenseDateTime() {
+        if (this.expenseDate == null) {
+            return this.createdAt != null ? this.createdAt : LocalDateTime.now();
+        }
+        LocalTime time = this.expenseTime != null ? this.expenseTime : LocalTime.of(12, 0);
+        return LocalDateTime.of(this.expenseDate, time);
     }
 }

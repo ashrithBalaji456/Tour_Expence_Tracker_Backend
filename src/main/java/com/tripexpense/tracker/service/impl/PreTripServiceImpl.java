@@ -1,6 +1,7 @@
 package com.tripexpense.tracker.service.impl;
 
 import com.tripexpense.tracker.dto.*;
+import com.tripexpense.tracker.entity.SplitMode;
 import com.tripexpense.tracker.entity.PreTripExpense;
 import com.tripexpense.tracker.entity.PreTripMember;
 import com.tripexpense.tracker.entity.TripGroup;
@@ -21,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -94,6 +96,14 @@ public class PreTripServiceImpl implements PreTripService {
         TripGroup activeGroup = getActiveTripGroup();
         verifyWriteAccess(activeGroup);
 
+        SplitMode mode = request.getSplitMode() != null ? request.getSplitMode() : SplitMode.FROM_START;
+        LocalDateTime effective = null;
+        if (mode == SplitMode.FROM_NOW) {
+            effective = LocalDateTime.now();
+        } else if (mode == SplitMode.CUSTOM_DATE) {
+            effective = request.getEffectiveFrom() != null ? request.getEffectiveFrom() : LocalDateTime.now();
+        }
+
         Optional<PreTripMember> existing = memberRepository.findByNameIgnoreCaseAndTripGroup(request.getName(), activeGroup);
         PreTripMember member;
         if (existing.isPresent()) {
@@ -101,13 +111,64 @@ public class PreTripServiceImpl implements PreTripService {
             if (request.getBudgetLimit() != null) {
                 member.setBudgetLimit(request.getBudgetLimit());
             }
+            if (request.getSplitMode() != null) {
+                member.setSplitMode(mode);
+                member.setEffectiveFrom(effective);
+            }
         } else {
             member = PreTripMember.builder()
                     .name(request.getName().trim())
                     .budgetLimit(request.getBudgetLimit() != null ? request.getBudgetLimit() : new BigDecimal("10000.00"))
+                    .splitMode(mode)
+                    .effectiveFrom(effective)
                     .tripGroup(activeGroup)
                     .build();
         }
+
+        // Add to activeGroup.memberUsernames if not present
+        String cleanName = request.getName().trim();
+        boolean alreadyInGroup = activeGroup.getMemberUsernames().stream()
+                .anyMatch(u -> u.equalsIgnoreCase(cleanName));
+        if (!alreadyInGroup) {
+            activeGroup.getMemberUsernames().add(cleanName);
+            tripGroupRepository.save(activeGroup);
+        }
+
+        PreTripMember saved = memberRepository.save(member);
+        return mapToMemberResponse(saved);
+    }
+
+    @Override
+    @Transactional
+    public PreTripMemberResponse updateMemberTimeline(Long id, PreTripMemberRequest request) {
+        TripGroup activeGroup = getActiveTripGroup();
+        verifyWriteAccess(activeGroup);
+
+        PreTripMember member = memberRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Member not found with ID: " + id));
+
+        if (!member.getTripGroup().getId().equals(activeGroup.getId())) {
+            throw new AccessDeniedException("Access denied to this record");
+        }
+
+        if (request.getBudgetLimit() != null) {
+            member.setBudgetLimit(request.getBudgetLimit());
+        }
+
+        if (request.getSplitMode() != null) {
+            member.setSplitMode(request.getSplitMode());
+            if (request.getSplitMode() == SplitMode.FROM_START) {
+                member.setEffectiveFrom(null);
+            } else if (request.getSplitMode() == SplitMode.FROM_NOW) {
+                member.setEffectiveFrom(LocalDateTime.now());
+            } else if (request.getSplitMode() == SplitMode.CUSTOM_DATE) {
+                member.setEffectiveFrom(request.getEffectiveFrom() != null ? request.getEffectiveFrom() : LocalDateTime.now());
+            }
+        } else if (request.getEffectiveFrom() != null) {
+            member.setEffectiveFrom(request.getEffectiveFrom());
+            member.setSplitMode(SplitMode.CUSTOM_DATE);
+        }
+
         PreTripMember saved = memberRepository.save(member);
         return mapToMemberResponse(saved);
     }
@@ -226,48 +287,81 @@ public class PreTripServiceImpl implements PreTripService {
         int memberCount = members.size();
         BigDecimal sharePerMember = totalSpent.divide(BigDecimal.valueOf(memberCount), 2, RoundingMode.HALF_UP);
 
-        // Group expenses by spentBy (case-insensitive key)
-        Map<String, BigDecimal> memberSpendMap = new HashMap<>();
+        // Dynamic temporal calculation maps
+        Map<String, BigDecimal> memberPaidMap = new HashMap<>();
+        Map<String, BigDecimal> memberOwedMap = new HashMap<>();
+        Map<String, Integer> memberEligibleCountMap = new HashMap<>();
+
         for (PreTripMember m : members) {
-            memberSpendMap.put(m.getName().toLowerCase(), BigDecimal.ZERO);
+            String key = m.getName().toLowerCase();
+            memberPaidMap.put(key, BigDecimal.ZERO);
+            memberOwedMap.put(key, BigDecimal.ZERO);
+            memberEligibleCountMap.put(key, 0);
         }
 
-        BigDecimal countMembers = BigDecimal.valueOf(members.isEmpty() ? 1 : members.size());
+        // 1. Process Pre-Trip Expenses
+        for (PreTripExpense pe : expenses) {
+            LocalDateTime expenseTime = pe.getExpenseDateTime();
+            BigDecimal amt = pe.getAmount() != null ? pe.getAmount() : BigDecimal.ZERO;
 
-        for (PreTripExpense e : expenses) {
-            if (e.getSpentBy() != null) {
-                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
-                if (e.getSpentBy().equalsIgnoreCase("Group")) {
-                    BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
-                    for (PreTripMember m : members) {
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .toList();
+            if (eligible.isEmpty()) eligible = members;
+
+            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+            for (PreTripMember m : eligible) {
+                String key = m.getName().toLowerCase();
+                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            }
+
+            if (pe.getSpentBy() != null) {
+                if (pe.getSpentBy().equalsIgnoreCase("Group")) {
+                    for (PreTripMember m : eligible) {
                         String key = m.getName().toLowerCase();
-                        memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
                     }
                 } else {
-                    String key = e.getSpentBy().toLowerCase();
-                    memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                    String key = pe.getSpentBy().toLowerCase();
+                    memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
                 }
             }
         }
 
-        // Add active trip spends (excluding settlements)
+        // 2. Process Active Trip Expenses (excluding settlements)
         for (Expense e : activeExpenses) {
-            if (e.getPaidBy() != null && e.getCategory() != Category.SETTLEMENT) {
-                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
-                if (e.getPaidBy().equalsIgnoreCase("Group")) {
-                    BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
-                    for (PreTripMember m : members) {
+            if (e.getCategory() == Category.SETTLEMENT) continue;
+
+            LocalDateTime expenseTime = e.getExpenseDateTime();
+            BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .toList();
+            if (eligible.isEmpty()) eligible = members;
+
+            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+            for (PreTripMember m : eligible) {
+                String key = m.getName().toLowerCase();
+                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            }
+
+            if (e.getPaidBy() != null) {
+                if (e.getPaidBy().equalsIgnoreCase("Group") || e.getPaidBy().equalsIgnoreCase("Group Pool")) {
+                    for (PreTripMember m : eligible) {
                         String key = m.getName().toLowerCase();
-                        memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
                     }
                 } else {
                     String key = e.getPaidBy().toLowerCase();
-                    memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                    memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
                 }
             }
         }
 
-        // Adjust for any recorded settlements from active expenses
+        // 3. Adjust for any recorded settlements from active expenses
         for (Expense e : activeExpenses) {
             if (e.getCategory() == Category.SETTLEMENT && e.getPaidBy() != null) {
                 BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
@@ -280,8 +374,8 @@ public class PreTripServiceImpl implements PreTripService {
                     }
                 }
                 if (toKey != null) {
-                    memberSpendMap.put(fromKey, memberSpendMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
-                    memberSpendMap.put(toKey, memberSpendMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
+                    memberPaidMap.put(fromKey, memberPaidMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
+                    memberPaidMap.put(toKey, memberPaidMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
                 }
             }
         }
@@ -291,20 +385,26 @@ public class PreTripServiceImpl implements PreTripService {
         List<MemberBalanceHelper> debtors = new ArrayList<>();
 
         for (PreTripMember m : members) {
-            BigDecimal spent = memberSpendMap.getOrDefault(m.getName().toLowerCase(), BigDecimal.ZERO);
-            BigDecimal netBalance = spent.subtract(sharePerMember);
+            String key = m.getName().toLowerCase();
+            BigDecimal paid = memberPaidMap.getOrDefault(key, BigDecimal.ZERO);
+            BigDecimal owed = memberOwedMap.getOrDefault(key, BigDecimal.ZERO);
+            BigDecimal netBalance = paid.subtract(owed);
 
-            boolean isSpentOverBudget = spent.compareTo(m.getBudgetLimit()) > 0;
-            boolean isShareOverBudget = sharePerMember.compareTo(m.getBudgetLimit()) > 0;
+            boolean isSpentOverBudget = paid.compareTo(m.getBudgetLimit()) > 0;
+            boolean isShareOverBudget = owed.compareTo(m.getBudgetLimit()) > 0;
 
             summaries.add(PreTripMemberSummaryDto.builder()
+                    .memberId(m.getId())
                     .memberName(m.getName())
                     .budgetLimit(m.getBudgetLimit())
-                    .totalSpent(spent)
-                    .share(sharePerMember)
+                    .totalSpent(paid)
+                    .share(owed)
                     .netBalance(netBalance)
                     .isSpentOverBudget(isSpentOverBudget)
                     .isShareOverBudget(isShareOverBudget)
+                    .effectiveFrom(m.getEffectiveFrom())
+                    .splitMode(m.getSplitMode())
+                    .eligibleExpenseCount(memberEligibleCountMap.getOrDefault(key, 0))
                     .build());
 
             if (netBalance.compareTo(BigDecimal.ZERO) > 0) {
@@ -368,6 +468,8 @@ public class PreTripServiceImpl implements PreTripService {
                 .id(member.getId())
                 .name(member.getName())
                 .budgetLimit(member.getBudgetLimit())
+                .effectiveFrom(member.getEffectiveFrom())
+                .splitMode(member.getSplitMode())
                 .createdAt(member.getCreatedAt())
                 .build();
     }

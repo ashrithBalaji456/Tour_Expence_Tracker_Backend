@@ -26,6 +26,14 @@ public class PreTripMember {
     @Builder.Default
     private BigDecimal budgetLimit = new BigDecimal("10000.00");
 
+    @Column(name = "effective_from")
+    private LocalDateTime effectiveFrom;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "split_mode", nullable = false)
+    @Builder.Default
+    private SplitMode splitMode = SplitMode.FROM_START;
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "trip_group_id")
     private TripGroup tripGroup;

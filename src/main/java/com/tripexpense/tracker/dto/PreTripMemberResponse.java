@@ -1,5 +1,6 @@
 package com.tripexpense.tracker.dto;
 
+import com.tripexpense.tracker.entity.SplitMode;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -16,5 +17,7 @@ public class PreTripMemberResponse {
     private Long id;
     private String name;
     private BigDecimal budgetLimit;
+    private LocalDateTime effectiveFrom;
+    private SplitMode splitMode;
     private LocalDateTime createdAt;
 }

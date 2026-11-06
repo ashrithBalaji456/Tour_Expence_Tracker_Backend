@@ -9,6 +9,7 @@ public interface PreTripService {
     // Members
     List<PreTripMemberResponse> getAllMembers();
     PreTripMemberResponse saveMember(PreTripMemberRequest request);
+    PreTripMemberResponse updateMemberTimeline(Long id, PreTripMemberRequest request);
     void deleteMember(Long id);
 
     // Expenses

@@ -45,4 +45,11 @@ public class PreTripExpense {
     protected void onCreate() {
         this.createdAt = LocalDateTime.now();
     }
+
+    public LocalDateTime getExpenseDateTime() {
+        if (this.expenseDate == null) {
+            return this.createdAt != null ? this.createdAt : LocalDateTime.now();
+        }
+        return this.expenseDate.atStartOfDay();
+    }
 }

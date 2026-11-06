@@ -27,6 +27,14 @@ public class PreTripController {
         return new ResponseEntity<>(preTripService.saveMember(request), HttpStatus.CREATED);
     }
 
+    @PutMapping("/members/{id}/timeline")
+    public ResponseEntity<PreTripMemberResponse> updateMemberTimeline(
+            @PathVariable Long id,
+            @RequestBody PreTripMemberRequest request
+    ) {
+        return ResponseEntity.ok(preTripService.updateMemberTimeline(id, request));
+    }
+
     @DeleteMapping("/members/{id}")
     public ResponseEntity<Void> deleteMember(@PathVariable Long id) {
         preTripService.deleteMember(id);

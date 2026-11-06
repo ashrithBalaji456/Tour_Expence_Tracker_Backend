@@ -17,6 +17,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.util.List;
 
 @Service
@@ -85,6 +86,7 @@ public class ExpenseServiceImpl implements ExpenseService {
                 .paymentMode(request.getPaymentMode())
                 .paidBy(request.getPaidBy() != null && !request.getPaidBy().isBlank() ? request.getPaidBy() : "Group Pool")
                 .expenseDate(request.getExpenseDate() != null ? request.getExpenseDate() : LocalDate.now())
+                .expenseTime(request.getExpenseTime() != null ? request.getExpenseTime() : LocalTime.now())
                 .notes(request.getNotes())
                 .tripGroup(activeGroup)
                 .build();
@@ -156,6 +158,9 @@ public class ExpenseServiceImpl implements ExpenseService {
         if (request.getExpenseDate() != null) {
             expense.setExpenseDate(request.getExpenseDate());
         }
+        if (request.getExpenseTime() != null) {
+            expense.setExpenseTime(request.getExpenseTime());
+        }
         expense.setNotes(request.getNotes());
 
         Expense updated = expenseRepository.save(expense);
@@ -187,6 +192,7 @@ public class ExpenseServiceImpl implements ExpenseService {
                 .paymentMode(expense.getPaymentMode())
                 .paidBy(expense.getPaidBy())
                 .expenseDate(expense.getExpenseDate())
+                .expenseTime(expense.getExpenseTime())
                 .notes(expense.getNotes())
                 .createdAt(expense.getCreatedAt())
                 .build();

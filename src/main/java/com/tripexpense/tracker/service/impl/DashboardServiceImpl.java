@@ -131,64 +131,95 @@ public class DashboardServiceImpl implements DashboardService {
             sharePerMember = totalSpent.divide(BigDecimal.valueOf(memberCount), 2, RoundingMode.HALF_UP);
         }
 
-        // Compute spending per member
-        Map<String, BigDecimal> memberSpendMap = new HashMap<>();
+        // Dynamic temporal calculation maps
+        Map<String, BigDecimal> memberPaidMap = new HashMap<>();
+        Map<String, BigDecimal> memberOwedMap = new HashMap<>();
+        Map<String, Integer> memberEligibleCountMap = new HashMap<>();
+
         for (PreTripMember m : members) {
-            memberSpendMap.put(m.getName().toLowerCase(), BigDecimal.ZERO);
+            String key = m.getName().toLowerCase();
+            memberPaidMap.put(key, BigDecimal.ZERO);
+            memberOwedMap.put(key, BigDecimal.ZERO);
+            memberEligibleCountMap.put(key, 0);
         }
 
-        BigDecimal countMembers = BigDecimal.valueOf(members.isEmpty() ? 1 : members.size());
-
-        // Add pre-trip spends
+        // 1. Process Pre-Trip Expenses
         for (PreTripExpense pe : preTripExpenses) {
+            java.time.LocalDateTime expenseTime = pe.getExpenseDateTime();
+            BigDecimal amt = pe.getAmount() != null ? pe.getAmount() : BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .toList();
+            if (eligible.isEmpty()) eligible = members;
+
+            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+            for (PreTripMember m : eligible) {
+                String key = m.getName().toLowerCase();
+                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            }
+
             if (pe.getSpentBy() != null) {
-                BigDecimal amt = pe.getAmount() != null ? pe.getAmount() : BigDecimal.ZERO;
                 if (pe.getSpentBy().equalsIgnoreCase("Group")) {
-                    BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
-                    for (PreTripMember m : members) {
+                    for (PreTripMember m : eligible) {
                         String key = m.getName().toLowerCase();
-                        memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
                     }
                 } else {
                     String key = pe.getSpentBy().toLowerCase();
-                    memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                    memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
                 }
             }
         }
 
-        // Add active trip spends
+        // 2. Process Active Trip Expenses (excluding settlements)
         for (Expense e : activeExpenses) {
-            if (e.getPaidBy() != null) {
-                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
-                
-                // Handle Settlements directly as peer-to-peer adjustments
-                if (e.getCategory() == Category.SETTLEMENT) {
-                    String fromKey = e.getPaidBy().toLowerCase();
-                    String toKey = null;
-                    if (e.getNotes() != null && e.getNotes().startsWith("Settle:")) {
-                        String[] parts = e.getNotes().split(":");
-                        if (parts.length >= 3) {
-                            toKey = parts[2].toLowerCase();
-                        }
-                    }
-                    if (toKey != null) {
-                        // Payer (fromKey) out-of-pocket spend goes up by amt (reducing their debt)
-                        memberSpendMap.put(fromKey, memberSpendMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
-                        // Receiver (toKey) out-of-pocket spend goes down by amt (reducing their credit)
-                        memberSpendMap.put(toKey, memberSpendMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
-                    }
-                    continue;
-                }
+            if (e.getCategory() == Category.SETTLEMENT) continue;
 
-                if (e.getPaidBy().equalsIgnoreCase("Group")) {
-                    BigDecimal splitShare = amt.divide(countMembers, 2, RoundingMode.HALF_UP);
-                    for (PreTripMember m : members) {
+            java.time.LocalDateTime expenseTime = e.getExpenseDateTime();
+            BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+
+            List<PreTripMember> eligible = members.stream()
+                    .filter(m -> m.getEffectiveFrom() == null || !m.getEffectiveFrom().isAfter(expenseTime))
+                    .toList();
+            if (eligible.isEmpty()) eligible = members;
+
+            BigDecimal splitShare = amt.divide(BigDecimal.valueOf(eligible.size()), 2, RoundingMode.HALF_UP);
+            for (PreTripMember m : eligible) {
+                String key = m.getName().toLowerCase();
+                memberOwedMap.put(key, memberOwedMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                memberEligibleCountMap.put(key, memberEligibleCountMap.getOrDefault(key, 0) + 1);
+            }
+
+            if (e.getPaidBy() != null) {
+                if (e.getPaidBy().equalsIgnoreCase("Group") || e.getPaidBy().equalsIgnoreCase("Group Pool")) {
+                    for (PreTripMember m : eligible) {
                         String key = m.getName().toLowerCase();
-                        memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
+                        memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(splitShare));
                     }
                 } else {
                     String key = e.getPaidBy().toLowerCase();
-                    memberSpendMap.put(key, memberSpendMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                    memberPaidMap.put(key, memberPaidMap.getOrDefault(key, BigDecimal.ZERO).add(amt));
+                }
+            }
+        }
+
+        // 3. Adjust for any recorded settlements from active expenses
+        for (Expense e : activeExpenses) {
+            if (e.getCategory() == Category.SETTLEMENT && e.getPaidBy() != null) {
+                BigDecimal amt = e.getAmount() != null ? e.getAmount() : BigDecimal.ZERO;
+                String fromKey = e.getPaidBy().toLowerCase();
+                String toKey = null;
+                if (e.getNotes() != null && e.getNotes().startsWith("Settle:")) {
+                    String[] parts = e.getNotes().split(":");
+                    if (parts.length >= 3) {
+                        toKey = parts[2].toLowerCase();
+                    }
+                }
+                if (toKey != null) {
+                    memberPaidMap.put(fromKey, memberPaidMap.getOrDefault(fromKey, BigDecimal.ZERO).add(amt));
+                    memberPaidMap.put(toKey, memberPaidMap.getOrDefault(toKey, BigDecimal.ZERO).subtract(amt));
                 }
             }
         }
@@ -198,20 +229,26 @@ public class DashboardServiceImpl implements DashboardService {
         List<MemberBalanceHelper> debtors = new ArrayList<>();
 
         for (PreTripMember m : members) {
-            BigDecimal spent = memberSpendMap.getOrDefault(m.getName().toLowerCase(), BigDecimal.ZERO);
-            BigDecimal netBalance = spent.subtract(sharePerMember);
+            String key = m.getName().toLowerCase();
+            BigDecimal paid = memberPaidMap.getOrDefault(key, BigDecimal.ZERO);
+            BigDecimal owed = memberOwedMap.getOrDefault(key, BigDecimal.ZERO);
+            BigDecimal netBalance = paid.subtract(owed);
 
-            boolean isSpentOverBudget = spent.compareTo(m.getBudgetLimit()) > 0;
-            boolean isShareOverBudget = sharePerMember.compareTo(m.getBudgetLimit()) > 0;
+            boolean isSpentOverBudget = paid.compareTo(m.getBudgetLimit()) > 0;
+            boolean isShareOverBudget = owed.compareTo(m.getBudgetLimit()) > 0;
 
             summaries.add(PreTripMemberSummaryDto.builder()
+                    .memberId(m.getId())
                     .memberName(m.getName())
                     .budgetLimit(m.getBudgetLimit())
-                    .totalSpent(spent)
-                    .share(sharePerMember)
+                    .totalSpent(paid)
+                    .share(owed)
                     .netBalance(netBalance)
                     .isSpentOverBudget(isSpentOverBudget)
                     .isShareOverBudget(isShareOverBudget)
+                    .effectiveFrom(m.getEffectiveFrom())
+                    .splitMode(m.getSplitMode())
+                    .eligibleExpenseCount(memberEligibleCountMap.getOrDefault(key, 0))
                     .build());
 
             if (netBalance.compareTo(BigDecimal.ZERO) > 0) {
