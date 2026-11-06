@@ -5,3 +5,4 @@ public enum SplitMode {
     FROM_NOW,
     CUSTOM_DATE
 }
+
