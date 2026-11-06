@@ -175,12 +175,15 @@ public class AuthController {
 
         List<AuthResponse> dtos = groups.stream().map(g -> {
             boolean isCreator = g.getCreator().getUsername().equalsIgnoreCase(currentUsername);
+            int count = (g.getMemberUsernames() != null ? g.getMemberUsernames().size() : 0) + 1;
             return AuthResponse.builder()
                     .groupId(g.getId())
                     .groupName(g.getName())
                     .username(currentUsername)
                     .hasGroup(true)
                     .isCreator(isCreator)
+                    .createdAt(g.getCreatedAt())
+                    .memberCount(count)
                     .build();
         }).toList();
 

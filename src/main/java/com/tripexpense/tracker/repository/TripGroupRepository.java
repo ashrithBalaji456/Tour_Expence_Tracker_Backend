@@ -13,6 +13,6 @@ import java.util.List;
 public interface TripGroupRepository extends JpaRepository<TripGroup, Long> {
     List<TripGroup> findByCreator(User creator);
     
-    @Query("SELECT tg FROM TripGroup tg WHERE LOWER(tg.creator.username) = LOWER(:username) OR LOWER(:username) IN (SELECT LOWER(m) FROM tg.memberUsernames m) OR LOWER(:email) IN (SELECT LOWER(m) FROM tg.memberUsernames m)")
+    @Query("SELECT tg FROM TripGroup tg WHERE LOWER(tg.creator.username) = LOWER(:username) OR LOWER(:username) IN (SELECT LOWER(m) FROM tg.memberUsernames m) OR LOWER(:email) IN (SELECT LOWER(m) FROM tg.memberUsernames m) ORDER BY tg.createdAt DESC")
     List<TripGroup> findAssociatedGroups(@Param("username") String username, @Param("email") String email);
 }

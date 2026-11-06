@@ -6,6 +6,8 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.LocalDateTime;
+
 @Data
 @NoArgsConstructor
 @AllArgsConstructor
@@ -16,6 +18,8 @@ public class AuthResponse {
     private String groupName;
     private Long groupId;
     private boolean hasGroup;
+    private LocalDateTime createdAt;
+    private int memberCount;
     
     @JsonProperty("isCreator")
     private boolean isCreator;
