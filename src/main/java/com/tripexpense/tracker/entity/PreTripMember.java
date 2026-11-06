@@ -30,7 +30,7 @@ public class PreTripMember {
     private LocalDateTime effectiveFrom;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "split_mode", nullable = false)
+    @Column(name = "split_mode")
     @Builder.Default
     private SplitMode splitMode = SplitMode.FROM_START;
 
